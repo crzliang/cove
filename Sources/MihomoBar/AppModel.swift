@@ -47,6 +47,9 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var status: Kernel.Status = .stopped
+    /// 解析后的内核版本；解析失败时为 nil，此时退回显示 `versionLine` 原文
+    @Published private(set) var kernelVersion: KernelVersion?
+    /// 内核 `-v` 的原始输出（兜底用）
     @Published private(set) var versionLine: String = "—"
     @Published private(set) var groups: [GroupInfo] = []
     @Published private(set) var mode: String = "rule"
@@ -409,9 +412,20 @@ final class AppModel: ObservableObject {
         guard let binary = try? Bundled.ensureKernel(),
               let line = Bundled.kernelVersion(binary: binary) else {
             versionLine = BundledError.kernelMissing.description
+            kernelVersion = nil
             return
         }
         versionLine = line
+        kernelVersion = KernelVersion.parse(line)
+    }
+
+    /// 概览页副标题。
+    ///
+    /// 只放「哪个内核 + 版本号」—— 平台、Go 版本、构建时间、编译标签都在设置页。
+    /// 之前把 `mihomo -v` 的原始两行直接铺上去，是 88 字符的一整行，
+    /// 实测横跨窗口 44% 宽度，副标题位置完全读不了。
+    var versionSummary: String {
+        kernelVersion?.short ?? versionLine
     }
 
     var logTail: String { kernel.tailLog(lines: 120) }

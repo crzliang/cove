@@ -5,7 +5,7 @@ struct OverviewPane: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        PaneScaffold(title: "概览", subtitle: model.versionLine) {
+        PaneScaffold(title: "概览", subtitle: model.versionSummary) {
             statusGrid
             trafficCard
             if model.status.isRunning {

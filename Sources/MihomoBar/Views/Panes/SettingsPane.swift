@@ -21,8 +21,24 @@ struct SettingsPane: View {
     private var kernelCard: some View {
         Card(title: "内核", systemImage: "cpu") {
             VStack(alignment: .leading, spacing: 12) {
-                InfoRow("版本", value: model.versionLine)
-                Divider()
+                if let v = model.kernelVersion {
+                    InfoRow("版本", value: v.short)
+                    Divider()
+                    InfoRow("平台", value: v.platform)
+                    Divider()
+                    if let built = v.buildTime {
+                        InfoRow("构建时间", value: built)
+                        Divider()
+                    }
+                    if !v.tags.isEmpty {
+                        InfoRow("编译标签", value: v.tags.joined(separator: ", "))
+                        Divider()
+                    }
+                } else {
+                    // 解析不出来就原样显示，不要因为格式化而丢信息
+                    InfoRow("版本", value: model.versionLine)
+                    Divider()
+                }
                 InfoRow("混合端口", hint: "HTTP / SOCKS 共用，也是系统代理指向的端口") {
                     TextField("", value: $model.settings.mixedPort, format: .number)
                         .textFieldStyle(.roundedBorder)

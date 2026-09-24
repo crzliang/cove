@@ -292,6 +292,25 @@ enum SelfTest {
                 check("旧版 settings.json 可解码", false, "解析失败，老用户设置会丢失")
             }
 
+            // 9d. 内核版本字符串解析。
+            //     原始输出是一整行 88 字符，直接铺界面上会横跨窗口 44% 宽。
+            let rawVersion = "Mihomo Meta v1.19.21 darwin arm64 with go1.24.13 "
+                           + "Mon Mar 9 16:55:59 UTC 2026\nUse tags: with_gvisor"
+            if let v = KernelVersion.parse(rawVersion) {
+                check("内核版本解析", true, "\(v.short) · \(v.platform)")
+                check("解析出产品名与版本", v.product == "Mihomo Meta" && v.version == "1.19.21",
+                      "\(v.product) / \(v.version)")
+                check("解析出平台", v.os == "darwin" && v.arch == "arm64" && v.goVersion == "go1.24.13")
+                check("构建时间去星期几并补零", v.buildTime == "2026-03-09 16:55:59 UTC",
+                      v.buildTime ?? "nil")
+                check("解析出编译标签", v.tags == ["with_gvisor"], "\(v.tags)")
+                check("概览副标题简短", v.short == "Mihomo Meta v1.19.21", v.short)
+            } else {
+                check("内核版本解析", false, "解析返回 nil")
+            }
+            check("解析失败不崩、返回 nil",
+                  KernelVersion.parse("这不是版本号") == nil)
+
             // 10. 优雅停止
             let before = ProcessInfo.processInfo.systemUptime
             k.stop()
