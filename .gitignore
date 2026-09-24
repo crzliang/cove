@@ -1,0 +1,14 @@
+.build/
+build/
+*.dmg
+
+# 内核与面板是下载来的二进制，不入库（用 scripts/fetch-kernel.sh 获取）
+Resources/mihomo
+Resources/ui/
+Resources/*.gz
+Resources/*.tar.gz
+Resources/ui-dist/
+
+.DS_Store
+*.xcuserstate
+xcuserdata/
