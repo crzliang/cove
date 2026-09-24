@@ -15,6 +15,20 @@ struct Settings: Codable, Equatable {
     var customConfigPath: String = ""
     /// 是否在 Dock 中显示图标。关掉就退化成纯菜单栏应用。
     var showInDock: Bool = true
+    /// 启动时是否自动打开主窗口。
+    ///
+    /// 不用启发式判断「是不是开机自启拉起的」—— 试过两条路都不行：
+    /// `NSAppleEventManager.currentAppleEvent`（open 启动时为 nil）和
+    /// `NSApplicationLaunchIsDefaultLaunchKey`（终端启动时也是 false，实测确认）。
+    /// 与其瞎猜，不如给用户一个开关；开启「开机自启」时会自动关掉它。
+    var showWindowOnLaunch: Bool = true
+
+    /// 窗口位置是否由**用户拖动**决定过。
+    ///
+    /// 不用这个标记的话会有个鸡生蛋问题：应用自己把窗口放到某个位置 → 自动保存 →
+    /// 下次启动“恢复”到那个位置。实测就是窗口反复出现在第二块屏幕上（用户从没放过）。
+    /// 只有用户真正拖过窗口，才尊重保存的坐标。
+    var windowPositionIsUserChosen: Bool = false
 
     static func load() -> Settings {
         guard let data = try? Data(contentsOf: Paths.settings) else { return Settings() }
@@ -45,7 +59,8 @@ extension Settings {
 
     private enum CodingKeys: String, CodingKey {
         case subscriptionURL, mixedPort, tunEnabled, mode, logLevel
-        case customConfigPath, showInDock
+        case customConfigPath, showInDock, windowPositionIsUserChosen
+        case showWindowOnLaunch
     }
 
     /// 手写解码，而不是用编译器合成的。
@@ -68,6 +83,12 @@ extension Settings {
         logLevel         = try c.decodeIfPresent(String.self, forKey: .logLevel)         ?? d.logLevel
         customConfigPath = try c.decodeIfPresent(String.self, forKey: .customConfigPath) ?? d.customConfigPath
         showInDock       = try c.decodeIfPresent(Bool.self,   forKey: .showInDock)       ?? d.showInDock
+        windowPositionIsUserChosen
+                         = try c.decodeIfPresent(Bool.self,   forKey: .windowPositionIsUserChosen)
+                           ?? d.windowPositionIsUserChosen
+        showWindowOnLaunch
+                         = try c.decodeIfPresent(Bool.self,   forKey: .showWindowOnLaunch)
+                           ?? d.showWindowOnLaunch
     }
 }
 

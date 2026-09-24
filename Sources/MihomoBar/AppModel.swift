@@ -11,6 +11,33 @@ import HelperProtocol
 @MainActor
 final class AppModel: ObservableObject {
 
+    /// 主窗口侧边栏的导航项。
+    /// 因为不能用 `@State`（CLT 下 SwiftUI 宏插件缺失），选择状态放在这里。
+    enum SidebarItem: String, CaseIterable, Identifiable {
+        case overview, proxies, subscription, logs, settings
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .overview:     return "概览"
+            case .proxies:      return "节点"
+            case .subscription: return "订阅"
+            case .logs:         return "日志"
+            case .settings:     return "设置"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .overview:     return "gauge.medium"
+            case .proxies:      return "point.3.connected.trianglepath.dotted"
+            case .subscription: return "arrow.triangle.2.circlepath"
+            case .logs:         return "text.alignleft"
+            case .settings:     return "gearshape"
+            }
+        }
+    }
+
     struct GroupInfo: Identifiable {
         let id: String
         let name: String
@@ -30,6 +57,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var helperInstalled = false
     @Published private(set) var helperRunning = false
 
+    // MARK: - 界面状态（同样因为不能用 @State）
+    @Published var sidebarSelection: SidebarItem = .overview
+    @Published var nodeSearch: String = ""
+    @Published var selectedGroupID: String?
+    /// 单节点延迟测试结果。比 /proxies 里带的 history 更新，用来做即时反馈。
+    @Published private(set) var nodeDelays: [String: Int] = [:]
+    @Published private(set) var testingDelays = false
+
     @Published var settings: Settings
     @Published var banner: Banner?
 
@@ -48,6 +83,7 @@ final class AppModel: ObservableObject {
     }
 
     let kernel = Kernel()
+    let traffic = TrafficMonitor()
 
     /// 由 AppDelegate 注入：打开独立主窗口。
     /// 用回调而不是直接引用 AppDelegate，避免 AppModel 依赖 UI 层。
@@ -236,6 +272,43 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 测一组节点的延迟。交给内核并发跑，比在客户端逐个发请求快得多。
+    func testDelays(group: String, all: Bool = true) async {
+        guard let ctl, let info = groups.first(where: { $0.id == group }) else { return }
+        testingDelays = true
+        defer { testingDelays = false }
+
+        let targets = all ? info.options : [info.now]
+        await withTaskGroup(of: (String, Int?).self) { taskGroup in
+            for name in targets.prefix(200) {
+                taskGroup.addTask {
+                    let value = try? await ctl.delay(node: name)
+                    return (name, value)
+                }
+            }
+            for await (name, value) in taskGroup {
+                if let value { nodeDelays[name] = value }
+            }
+        }
+        try? await refreshProxies(using: ctl)
+    }
+
+    func testSingleDelay(_ node: String) async {
+        guard let ctl else { return }
+        if let value = try? await ctl.delay(node: node) {
+            nodeDelays[node] = value
+        }
+    }
+
+    /// 把某个策略组切换后的完整节点信息交给界面
+    func group(by id: String) -> GroupInfo? {
+        groups.first { $0.id == id }
+    }
+
+    var currentGroup: GroupInfo? {
+        group(by: selectedGroupID ?? "") ?? groups.first
+    }
+
     func openDashboard() {
         guard kernel.endpoint != nil else {
             banner = Banner(text: "内核未运行", isError: true)
@@ -251,7 +324,15 @@ final class AppModel: ObservableObject {
         do {
             try LaunchAtLogin.set(enabled)
             launchAtLogin = LaunchAtLogin.isEnabled
-            banner = Banner(text: launchAtLogin ? "已设置为开机自启" : "已取消开机自启",
+
+            // 开机自启时自动开窗会很打扰，顺手关掉（用户随时可以再打开）
+            var note = ""
+            if launchAtLogin && settings.showWindowOnLaunch {
+                settings.showWindowOnLaunch = false
+                try? settings.save()
+                note = "，并已关闭「启动时打开窗口」以免开机时打扰"
+            }
+            banner = Banner(text: launchAtLogin ? "已设置为开机自启\(note)" : "已取消开机自启",
                             isError: false)
         } catch {
             launchAtLogin = LaunchAtLogin.isEnabled
@@ -350,6 +431,13 @@ final class AppModel: ObservableObject {
         launchAtLogin = LaunchAtLogin.isEnabled
         helperInstalled = HelperInstaller.isInstalled
         helperRunning = HelperInstaller.isRunning
+
+        // 内核起来就接上流量流，停了就断开
+        if let endpoint = kernel.endpoint {
+            traffic.start(base: endpoint, secret: kernel.secret)
+        } else if traffic.active {
+            traffic.stop()
+        }
 
         guard let ctl else {
             groups = []
