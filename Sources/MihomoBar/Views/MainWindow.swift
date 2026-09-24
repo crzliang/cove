@@ -28,48 +28,27 @@ struct MainWindow: View {
         )
     }
 
+    /// 让侧边栏首条与内容区标题处于同一条基线。
+    ///
+    /// 侧边栏的 `List` 自身内边距很小（约 4pt），而内容区 `PaneScaffold` 有 20pt
+    /// 顶部内边距。不补这一下，侧边栏会明显偏上。
+    private var sidebarTopInset: CGFloat { 5 }
+
     // MARK: - 侧边栏
 
     private var sidebar: some View {
+        // 扁平列表，不分组。
+        // 分组标题（"状态"/"代理"/"系统"）会占掉侧边栏顶部的垂直空间，
+        // 而内容区没有对应物，结果就是侧边栏首条比内容区标题低一截（实测差 14pt）。
+        // 六个条目本来也不需要分组。
         List(selection: selection) {
-            Section("状态") {
-                Label("概览", systemImage: AppModel.SidebarItem.overview.symbol)
-                    .tag(AppModel.SidebarItem.overview)
-            }
-            Section("代理") {
-                Label("节点", systemImage: AppModel.SidebarItem.proxies.symbol)
-                    .tag(AppModel.SidebarItem.proxies)
-                Label("订阅", systemImage: AppModel.SidebarItem.subscription.symbol)
-                    .tag(AppModel.SidebarItem.subscription)
-            }
-            Section("系统") {
-                Label("日志", systemImage: AppModel.SidebarItem.logs.symbol)
-                    .tag(AppModel.SidebarItem.logs)
-                Label("设置", systemImage: AppModel.SidebarItem.settings.symbol)
-                    .tag(AppModel.SidebarItem.settings)
+            ForEach(AppModel.SidebarItem.allCases) { item in
+                Label(item.title, systemImage: item.symbol)
+                    .tag(item)
             }
         }
         .listStyle(.sidebar)
-        .safeAreaInset(edge: .top, spacing: 0) { sidebarBrand }
-    }
-
-    private var sidebarBrand: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "shield.lefthalf.filled")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Color.accentColor)
-            VStack(alignment: .leading, spacing: 0) {
-                Text("MihomoBar")
-                    .font(.system(size: 13, weight: .semibold))
-                Text(model.status.label)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            StatusDot(level: kernelLevel)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.top, sidebarTopInset)
     }
 
     // MARK: - 内容
@@ -79,6 +58,7 @@ struct MainWindow: View {
         switch model.sidebarSelection {
         case .overview:     OverviewPane(model: model)
         case .proxies:      ProxiesPane(model: model)
+        case .connections:  ConnectionsPane(model: model)
         case .subscription: SubscriptionPane(model: model)
         case .logs:         LogsPane(model: model)
         case .settings:     SettingsPane(model: model)
@@ -98,6 +78,20 @@ struct MainWindow: View {
             }
             .disabled(model.status.isBusy || model.busy)
             .help(model.status.isRunning ? "停止内核" : "启动内核")
+        }
+
+        // 应用级状态放工具栏，而不是在侧边栏顶插一块 ——
+        // 侧边栏顶部插入自定义视图会让它的内容比内容区低一截，两者对不齐。
+        ToolbarItem(placement: .navigation) {
+            HStack(spacing: 6) {
+                StatusDot(level: kernelLevel)
+                Text(model.status.isRunning
+                     ? "端口 \(model.kernel.port)"
+                     : model.status.label)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
         }
 
         ToolbarItem(placement: .automatic) {

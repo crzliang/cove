@@ -14,13 +14,14 @@ final class AppModel: ObservableObject {
     /// 主窗口侧边栏的导航项。
     /// 因为不能用 `@State`（CLT 下 SwiftUI 宏插件缺失），选择状态放在这里。
     enum SidebarItem: String, CaseIterable, Identifiable {
-        case overview, proxies, subscription, logs, settings
+        case overview, proxies, connections, subscription, logs, settings
         var id: String { rawValue }
 
         var title: String {
             switch self {
             case .overview:     return "概览"
             case .proxies:      return "节点"
+            case .connections:  return "连接"
             case .subscription: return "订阅"
             case .logs:         return "日志"
             case .settings:     return "设置"
@@ -31,6 +32,7 @@ final class AppModel: ObservableObject {
             switch self {
             case .overview:     return "gauge.medium"
             case .proxies:      return "point.3.connected.trianglepath.dotted"
+            case .connections:  return "arrow.left.arrow.right.circle"
             case .subscription: return "arrow.triangle.2.circlepath"
             case .logs:         return "text.alignleft"
             case .settings:     return "gearshape"
@@ -67,6 +69,27 @@ final class AppModel: ObservableObject {
     /// 单节点延迟测试结果。比 /proxies 里带的 history 更新，用来做即时反馈。
     @Published private(set) var nodeDelays: [String: Int] = [:]
     @Published private(set) var testingDelays = false
+
+    // MARK: - 连接
+    @Published private(set) var connections: [CtlClient.Connection] = []
+    @Published private(set) var connectionTotals: (up: Int, down: Int) = (0, 0)
+    @Published private(set) var connectionMemory: Int = 0
+    /// 单条连接的实时速率（字节/秒）。
+    ///
+    /// mihomo 的 /connections 只给**累计**字节，没有速率字段，
+    /// 所以这里按两次轮询的差值自己算。
+    struct Rate: Equatable {
+        var up: Double = 0
+        var down: Double = 0
+    }
+
+    @Published private(set) var connectionRates: [String: Rate] = [:]
+    @Published var connectionSearch: String = ""
+    /// 连接列表默认按「最近有流量」排序，方便看正在传输的
+    @Published var connectionSortByTraffic = true
+
+    /// 上一次采样，用于算速率
+    private var previousSamples: [String: (up: Int, down: Int, at: Date)] = [:]
 
     @Published var settings: Settings
     @Published var banner: Banner?
@@ -312,6 +335,112 @@ final class AppModel: ObservableObject {
         group(by: selectedGroupID ?? "") ?? groups.first
     }
 
+    // MARK: - 连接
+
+    /// 拉取一次连接快照。可见时由轮询调用，也可以手动触发。
+    func refreshConnections() async {
+        guard let ctl else { connections = []; return }
+        await refreshConnections(using: ctl)
+    }
+
+    private func refreshConnections(using ctl: CtlClient) async {
+        do {
+            let snap = try await ctl.connections()
+            let list = snap.connections ?? []
+            connections = list
+            connectionTotals = (snap.uploadTotal, snap.downloadTotal)
+            connectionMemory = snap.memory ?? 0
+            updateRates(list)
+        } catch {
+            // 内核刚重启时接口可能还没就绪，静默跳过
+        }
+    }
+
+    /// 用相邻两次采样的字节差算速率
+    private func updateRates(_ list: [CtlClient.Connection]) {
+        let now = Date()
+        var rates: [String: Rate] = [:]
+
+        for conn in list {
+            if let prev = previousSamples[conn.id] {
+                let dt = now.timeIntervalSince(prev.at)
+                // 间隔太短会让差值噪声放大；间隔太长说明中间漏了采样
+                if dt > 0.3 && dt < 30 {
+                    rates[conn.id] = Rate(
+                        up: Double(max(0, conn.upload - prev.up)) / dt,
+                        down: Double(max(0, conn.download - prev.down)) / dt)
+                }
+            }
+        }
+
+        // 已经消失的连接要清掉，否则字典会无限增长
+        var next: [String: (up: Int, down: Int, at: Date)] = [:]
+        for conn in list {
+            next[conn.id] = (conn.upload, conn.download, now)
+        }
+        previousSamples = next
+        connectionRates = rates
+    }
+
+    func rate(for conn: CtlClient.Connection) -> Rate? {
+        connectionRates[conn.id]
+    }
+
+    func closeConnection(_ id: String) async {
+        guard let ctl else { return }
+        do {
+            try await ctl.closeConnection(id)
+            connections.removeAll { $0.id == id }
+        } catch {
+            banner = Banner(text: "断开连接失败：\(String(describing: error))", isError: true)
+        }
+    }
+
+    func closeAllConnections() async {
+        guard let ctl else { return }
+        do {
+            try await ctl.closeAllConnections()
+            connections = []
+            connectionRates = [:]
+            previousSamples = [:]
+            banner = Banner(text: "已断开全部连接", isError: false)
+        } catch {
+            banner = Banner(text: "断开失败：\(String(describing: error))", isError: true)
+        }
+    }
+
+    /// 按搜索词和排序偏好整理后的连接列表。
+    ///
+    /// 搜索的字段拼装刻意写成显式语句而不是 `[a,b,c].compactMap{...}` ——
+    /// 后者会让类型检查器直接超时（Swift 对长链式 Optional 表达式很敏感）。
+    var visibleConnections: [CtlClient.Connection] {
+        let keyword = connectionSearch.trimmingCharacters(in: .whitespaces).lowercased()
+        var list = connections
+
+        if !keyword.isEmpty {
+            list = connections.filter { conn in
+                let m = conn.metadata
+                var parts: [String] = []
+                parts.append(m?.host ?? "")
+                parts.append(m?.sniffHost ?? "")
+                parts.append(m?.destinationIP ?? "")
+                parts.append(m?.sourceIP ?? "")
+                parts.append(m?.destinationPort?.value ?? "")
+                parts.append(m?.sourcePort?.value ?? "")
+                parts.append(m?.process ?? "")
+                parts.append(m?.processPath ?? "")
+                parts.append(conn.rule ?? "")
+                parts.append(conn.rulePayload ?? "")
+                return parts.joined(separator: " ").lowercased().contains(keyword)
+            }
+        }
+
+        guard connectionSortByTraffic else { return list }
+        return list.sorted { a, b in
+            (a.upload + a.download) > (b.upload + b.download)
+        }
+    }
+
     func openDashboard() {
         guard kernel.endpoint != nil else {
             banner = Banner(text: "内核未运行", isError: true)
@@ -472,6 +601,12 @@ final class AppModel: ObservableObject {
             if let m = cfg.mode { mode = m }
             try await refreshProxies(using: ctl)
             await refreshProviderInfo(using: ctl)
+
+            // 连接列表只在「连接」页可见时拉 —— 连接多的时候这个接口不便宜，
+            // 没必要在用户看别的页面时一直轮询。
+            if sidebarSelection == .connections {
+                await refreshConnections(using: ctl)
+            }
         } catch {
             // 内核刚起来时 API 可能还没就绪，静默忽略，下个周期重试
         }

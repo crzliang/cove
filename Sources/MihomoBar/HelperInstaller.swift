@@ -131,6 +131,20 @@ enum HelperInstaller {
         """
     }
 
+    /// 提权内核副本是否已是最新 —— 即 `stageKernelForHelper()` 不需要重新安装。
+    ///
+    /// 存在的意义：重新安装要走 `osascript ... with administrator privileges`，
+    /// 会**弹授权框**。非交互场景（自检、脚本）里那等于挂死，所以调用方要先问一下。
+    static func kernelStagingIsCurrent() -> Bool {
+        guard let source = try? Bundled.ensureKernel() else { return false }
+        let destination = "\(Helper.socketDirectory)/mihomo"
+        let fm = FileManager.default
+        guard let src = (try? fm.attributesOfItem(atPath: source.path)[.modificationDate]) as? Date,
+              let dst = (try? fm.attributesOfItem(atPath: destination)[.modificationDate]) as? Date
+        else { return false }
+        return dst >= src && !needsQuarantineClear(destination)
+    }
+
     /// 检查文件是否带 Gatekeeper 隔离属性。
     /// 普通用户进程可以读 root 文件上的扩展属性，所以这里不需要提权。
     static func needsQuarantineClear(_ path: String) -> Bool {

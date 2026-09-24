@@ -73,6 +73,75 @@ struct CtlClient {
         let providers: [String: ProviderEntry]
     }
 
+    // MARK: - 连接（/connections）
+
+    struct Snapshot: Decodable {
+        let downloadTotal: Int
+        let uploadTotal: Int
+        let connections: [Connection]?
+        let memory: Int?
+    }
+
+    /// 一条活动连接。
+    ///
+    /// 字段名对应 mihomo 的 `statistic.TrackerInfo` / `C.Metadata`，不是猜的。
+    struct Connection: Decodable, Identifiable {
+        let id: String
+        let upload: Int
+        let download: Int
+        let start: String
+        let chains: [String]?
+        let rule: String?
+        let rulePayload: String?
+        let metadata: Metadata?
+
+        struct Metadata: Decodable {
+            /// "tcp" / "udp"
+            let network: String?
+            /// "HTTP" / "SOCKS" / ...
+            let type: String?
+            let sourceIP: String?
+            let destinationIP: String?
+            /// ⚠️ Go 侧标了 `json:"sourcePort,string"`，JSON 里是**字符串**不是数字。
+            /// 用 Port 类型兼容两种编码，避免 mihomo 哪天改回去就解析崩。
+            let sourcePort: Port?
+            let destinationPort: Port?
+            let host: String?
+            let process: String?
+            let processPath: String?
+            let dnsMode: String?
+            let remoteDestination: String?
+            let sniffHost: String?
+            let sourceIPASN: String?
+            let destinationIPASN: String?
+            let sourceGeoIP: [String]?
+            let destinationGeoIP: [String]?
+        }
+
+        /// 解析 Go `time.Time` 序列化出来的 RFC3339 时间戳。
+        ///
+        /// Go 会带 9 位纳秒（`2026-09-24T13:40:00.123456789+08:00`），
+        /// 而 `ISO8601DateFormatter` 默认只认 3 位小数，所以要先试带小数位的配置，
+        /// 再退回不带小数位的形式。
+        static func parseStart(_ raw: String) -> Date? {
+            let withFraction = ISO8601DateFormatter()
+            withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let d = withFraction.date(from: raw) { return d }
+            return ISO8601DateFormatter().date(from: raw)
+        }
+
+        /// 接受字符串或数字两种端口编码
+        struct Port: Decodable {
+            let value: String
+            init(from decoder: Decoder) throws {
+                let c = try decoder.singleValueContainer()
+                if let s = try? c.decode(String.self) { value = s }
+                else if let i = try? c.decode(Int.self) { value = String(i) }
+                else { value = "" }
+            }
+        }
+    }
+
     // MARK: - 请求
 
     private func request(_ path: String, method: String = "GET", body: [String: Any]? = nil) throws -> URLRequest {
@@ -156,6 +225,23 @@ struct CtlClient {
     func updateProvider(_ name: String) async throws {
         let n = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
         try await perform("/providers/proxies/\(n)", method: "PUT")
+    }
+
+    /// 活动连接快照。`/connections` 不带 Upgrade 头时返回一次性快照；
+    /// 带 WebSocket 升级头才是流式推送，应用侧用轮询就够。
+    func connections() async throws -> Snapshot {
+        try await fetch("/connections")
+    }
+
+    /// 断开单条连接
+    func closeConnection(_ id: String) async throws {
+        let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        try await perform("/connections/\(enc)", method: "DELETE")
+    }
+
+    /// 断开全部连接
+    func closeAllConnections() async throws {
+        try await perform("/connections", method: "DELETE")
     }
 
     /// 让内核重新读取磁盘上的配置（订阅更新后调用）

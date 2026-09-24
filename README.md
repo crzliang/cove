@@ -18,7 +18,7 @@ GUI 本体      ~1.3 MB（release）
 
 | | 内容 | 适合 |
 |---|---|---|
-| **主窗口**（880×620） | 导航分栏 + 工具栏 + 状态栏，五个页面 | 配置、看节点、查日志 |
+| **主窗口**（880×620） | 导航分栏 + 工具栏 + 状态栏，六个页面 | 配置、看节点、查连接 |
 | **菜单栏下拉菜单** | 原生 `NSMenu`，约 10 个条目 | 扫一眼状态、开关代理、切模式 |
 
 菜单栏刻意用**原生下拉菜单**而不是自绘 popover 面板：菜单位置本来就适合
@@ -101,7 +101,28 @@ mihomo -d <datadir> -f <用户配置> \
 | **带 quarantine 的内核被 root 执行时被 SIGKILL，且零输出** | 安装/复制时清除 `com.apple.quarantine`，并在自检里盯着 |
 | **`NSWindow.center()` 在应用未激活时会把窗口放到屏幕外** | 基于 `visibleFrame` 自行定位 + 可见性校验 |
 
-### 5. 复杂 UI 交给 MetaCubeXD
+### 5. 连接列表
+
+`/connections` 给出所有活动连接。每行展示用户实际关心的字段：
+
+```
+google.com:443                              tcp · HTTP        ↑ 1.2 KB/s   12 秒
+127.0.0.1:52341 → 142.250.1.1:443   DomainSuffix,google.com   ↑ 45 KB  ↓ 1.2 MB
+                                    PROXY → 香港01
+```
+
+两个实现要点：
+
+1. **端口在 JSON 里是字符串不是数字**。mihomo 的 `Metadata` 给
+   `SourcePort` / `DstPort` 都标了 `json:",string"`，所以解码时要
+   接受字符串（同时兼容数字，防止上游改回去）。
+2. **网速要自己算**。`/connections` 只给单条连接的**累计**字节数，没有速率字段。
+   应用按两次轮询的字节差除以时间得出速率，并对间隔做了限制
+   （< 0.3s 噪声太大，> 30s 说明中间漏了采样）。
+
+连接列表只在「连接」页可见时轮询 —— 连接多的时候这个接口不便宜。
+
+### 6. 复杂 UI 交给 MetaCubeXD
 
 节点列表、规则编辑、连接列表、流量曲线在浏览器面板里（点「面板」）。
 菜单栏只放每天真正会用的：启停、系统代理、模式、策略组快切、订阅状态、日志。
@@ -152,7 +173,7 @@ launchctl bootstrap system /Library/LaunchDaemons/local.mihomobar.helper.plist
    daemon，普通用户不在该组里，症状是「助手在跑但连不上」
 2. `launchctl bootstrap` 到 socket 可连有时要几秒，安装后的探测窗口不能太短
 
-### 7. 开机自启用 SMAppService
+### 8. 开机自启用 SMAppService
 
 macOS 13+ 的 `SMAppService.mainApp`，注册 app 自身，不需要写 plist、不需要 helper。
 
@@ -271,7 +292,7 @@ Sources/MihomoBar/
   Views/
     MainWindow.swift   导航分栏 + 工具栏 + 状态栏
     DesignSystem.swift Card / InfoRow / StatTile 等基础组件
-    Panes/             概览 / 节点 / 订阅 / 日志 / 设置
+    Panes/             概览 / 节点 / 连接 / 订阅 / 日志 / 设置
 
 Resources/             mihomo + ui/（gitignore，用脚本获取）
 scripts/fetch-kernel.sh

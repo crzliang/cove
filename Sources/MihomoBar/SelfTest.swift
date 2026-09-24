@@ -193,7 +193,15 @@ enum SelfTest {
                         check("助手可查询内核状态", false)
                     }
 
-                    // 真正验证提权路径：让助手以 root 启动内核
+                    // 真正验证提权路径：让助手以 root 启动内核。
+                    //
+                    // ⚠️ 前提是内核副本已是最新 —— 否则 stageKernelForHelper 会走
+                    // osascript 提权，弹出授权框。自检是非交互的，那会永远等下去。
+                    if !HelperInstaller.kernelStagingIsCurrent() {
+                        // 只跳过这一块，后面还有别的测试要跑
+                        print("  ℹ️  提权内核副本需要重新安装，跳过提权测试（否则会弹授权框）")
+                        print("      先在应用里启动一次内核完成安装，再跑自检")
+                    } else {
                     print("  … 通过助手以 root 启动内核")
                     let helperKernel = Kernel()
                     await helperKernel.start(config: config,
@@ -219,6 +227,7 @@ enum SelfTest {
                         check("提权内核已停止", !helperKernel.status.isRunning)
                     } else {
                         check("助手以 root 启动内核", false, helperKernel.lastError ?? "未知")
+                    }
                     }
                 }
             } else {
@@ -310,6 +319,52 @@ enum SelfTest {
             }
             check("解析失败不崩、返回 nil",
                   KernelVersion.parse("这不是版本号") == nil)
+
+            // 9e. 连接解析。
+            //     两个容易踩的点：sourcePort/destinationPort 在 JSON 里是**字符串**
+            //     （Go 侧标了 `,string`），start 是带 9 位纳秒的 RFC3339。
+            let connJSON = #"""
+            {"downloadTotal":5678,"uploadTotal":1234,"memory":102400,"connections":[
+              {"id":"6f7b3c1e-0000-4000-8000-000000000001","upload":1234,"download":5678,
+               "start":"2026-09-24T13:40:00.123456789+08:00",
+               "chains":["香港01","PROXY"],"rule":"DomainSuffix","rulePayload":"google.com",
+               "metadata":{"network":"tcp","type":"HTTP","sourceIP":"127.0.0.1",
+                 "destinationIP":"142.250.1.1","sourcePort":"52341","destinationPort":"443",
+                 "host":"www.google.com","process":"/Applications/Safari.app/Contents/MacOS/Safari",
+                 "dnsMode":"fake-ip","destinationIPASN":"AS15169"}},
+              {"id":"second","upload":10,"download":20,"start":"2026-09-24T13:41:00Z",
+               "chains":[],"rule":"MATCH","rulePayload":"",
+               "metadata":{"network":"udp","sourcePort":53,"destinationPort":53,
+                 "destinationIP":"8.8.8.8"}}
+            ]}
+            """#
+            if let data = connJSON.data(using: .utf8),
+               let snap = try? JSONDecoder().decode(CtlClient.Snapshot.self, from: data) {
+                let list = snap.connections ?? []
+                check("连接快照解析", list.count == 2, "\(list.count) 条")
+                check("累计流量", snap.uploadTotal == 1234 && snap.downloadTotal == 5678)
+                if let c = list.first {
+                    check("端口按字符串解析", c.metadata?.sourcePort?.value == "52341"
+                          && c.metadata?.destinationPort?.value == "443",
+                          "\(c.metadata?.sourcePort?.value ?? "nil"):\(c.metadata?.destinationPort?.value ?? "nil")")
+                    check("解析出协议", c.metadata?.network == "tcp" && c.metadata?.type == "HTTP")
+                    check("解析出源/目的 IP", c.metadata?.sourceIP == "127.0.0.1"
+                          && c.metadata?.destinationIP == "142.250.1.1")
+                    check("解析出规则与链路", c.rule == "DomainSuffix"
+                          && c.chains == ["香港01", "PROXY"])
+                    check("纳秒级时间戳可解析",
+                          CtlClient.Connection.parseStart(c.start) != nil,
+                          c.start)
+                }
+                if list.count == 2 {
+                    let c2 = list[1]
+                    check("端口为数字时也能解析", c2.metadata?.sourcePort?.value == "53",
+                          c2.metadata?.sourcePort?.value ?? "nil")
+                    check("秒级时间戳可解析", CtlClient.Connection.parseStart(c2.start) != nil)
+                }
+            } else {
+                check("连接快照解析", false, "解码失败")
+            }
 
             // 10. 优雅停止
             let before = ProcessInfo.processInfo.systemUptime
