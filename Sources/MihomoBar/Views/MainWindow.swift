@@ -9,10 +9,13 @@ struct MainWindow: View {
         NavigationSplitView {
             sidebar
                 .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
+                // 工具栏必须分挂在两侧栏上，标题栏底色分界才会跟着 NSSplitView 走；
+                // 挂在 NavigationSplitView 外层时，分界线会偏左一小截。
+                .toolbar { sidebarToolbar }
         } detail: {
             detail
+                .toolbar { detailToolbar }
         }
-        .toolbar { toolbarItems }
         .safeAreaInset(edge: .bottom, spacing: 0) { statusBar }
         .alert(item: alertBinding) { alert in
             Alert(title: Text(alert.title), message: Text(alert.message),
@@ -71,8 +74,8 @@ struct MainWindow: View {
     // MARK: - 工具栏
 
     @ToolbarContentBuilder
-    private var toolbarItems: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
+    private var sidebarToolbar: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
             Button {
                 Task { await model.toggleKernel() }
             } label: {
@@ -85,7 +88,7 @@ struct MainWindow: View {
 
         // 应用级状态放工具栏，而不是在侧边栏顶插一块 ——
         // 侧边栏顶部插入自定义视图会让它的内容比内容区低一截，两者对不齐。
-        ToolbarItem(placement: .navigation) {
+        ToolbarItem(placement: .primaryAction) {
             HStack(spacing: 6) {
                 StatusDot(level: kernelLevel)
                 Text(model.status.isRunning
@@ -96,7 +99,10 @@ struct MainWindow: View {
                     .fixedSize()
             }
         }
+    }
 
+    @ToolbarContentBuilder
+    private var detailToolbar: some ToolbarContent {
         ToolbarItem(placement: .automatic) {
             Toggle(isOn: Binding(
                 get: { model.systemProxyOn },

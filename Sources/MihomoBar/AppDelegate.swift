@@ -15,6 +15,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 如果照单全收，应用自己恢复出来的坐标会被当成「用户的选择」存下来，
     /// 然后下次启动继续沿用它 —— 于是窗口永远卡在某块屏上（实测踩到过）。
     private var windowSettled = false
+    /// 缓存标题栏分界 blocker；侧边栏拖拽时 AppKit 可能重建它，弱引用失效后再搜。
+    private weak var titlebarSplitBlocker: NSView?
+    private weak var titlebarLeadingBackground: NSView?
+    private weak var titlebarTrailingBackground: NSView?
+    private weak var splitDivider: NSView?
+    /// 限制全树搜索频率，避免 windowDidUpdate 每帧都扫一遍。
+    private var lastBlockerSearch: CFAbsoluteTime = 0
     private var cancellables = Set<AnyCancellable>()
     private let model = AppModel()
 
@@ -121,6 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // “恢复”到第二块屏」这种自说自话。
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.hideTitlebarSplitBlocker(force: true)
             if self.model.settings.windowPositionIsUserChosen {
                 self.ensureVisible(window)
             } else {
@@ -128,9 +136,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             // 等摆放彻底稳定后再允许把移动当作「用户拖动」
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.hideTitlebarSplitBlocker(force: true)
                 self?.windowSettled = true
             }
         }
+        // blocker 要等 toolbar / split view 装好才出现，多拍几次避免首帧漏掉
+        for delay in [0.05, 0.15, 0.35] as [TimeInterval] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.hideTitlebarSplitBlocker(force: true)
+            }
+        }
+    }
+
+    /// 修正 unified 工具栏下侧边栏分界错位。
+    ///
+    /// AppKit 会在交界处放 `NSTitlebarContainerBlockingView`，并把内容侧
+    /// `NSTitlebarBackgroundView` 的起点往左偏约 3pt，和下面
+    /// `NSVibrantSplitDividerView` 对不齐。这里藏掉 blocker，并把两侧标题栏
+    /// 底色裁到分隔线位置。
+    ///
+    /// - Parameters:
+    ///   - allowSearch: 为 false 时只处理已缓存的 blocker（给高频的 windowDidUpdate 用）。
+    ///   - force: 跳过搜索限频；显示窗口、改尺寸时用。
+    private func hideTitlebarSplitBlocker(allowSearch: Bool = true, force: Bool = false) {
+        let root = mainWindow?.contentView?.superview
+
+        if !force, let blocker = titlebarSplitBlocker, blocker.window != nil {
+            if blocker.alphaValue != 0 { blocker.alphaValue = 0 }
+            alignTitlebarBackgrounds(in: root)
+            return
+        }
+        guard allowSearch else { return }
+        if !force {
+            let now = CFAbsoluteTimeGetCurrent()
+            guard now - lastBlockerSearch >= 0.2 else { return }
+            lastBlockerSearch = now
+        } else {
+            lastBlockerSearch = CFAbsoluteTimeGetCurrent()
+        }
+        guard let root else { return }
+
+        if force {
+            titlebarSplitBlocker = nil
+            titlebarLeadingBackground = nil
+            titlebarTrailingBackground = nil
+            splitDivider = nil
+        }
+
+        let blockers = subviews(in: root) { name in
+            name.contains("TitlebarContainerBlocking")
+        }
+        if let blocker = blockers.first {
+            titlebarSplitBlocker = blocker
+            blocker.alphaValue = 0
+            blocker.wantsLayer = true
+            blocker.layer?.backgroundColor = NSColor.clear.cgColor
+            blocker.layer?.opacity = 0
+        }
+
+        alignTitlebarBackgrounds(in: root)
+    }
+
+    /// 把两侧 `NSTitlebarBackgroundView` 的交界裁到 `NSVibrantSplitDividerView`。
+    private func alignTitlebarBackgrounds(in root: NSView?) {
+        var divider = splitDivider
+        var leading = titlebarLeadingBackground
+        var trailing = titlebarTrailingBackground
+
+        if divider?.window == nil || leading?.window == nil || trailing?.window == nil {
+            guard let root else { return }
+            divider = subviews(in: root, matching: { $0.contains("VibrantSplitDivider") }).first
+            let bgs = subviews(in: root, matching: { $0.contains("TitlebarBackgroundView") })
+                .sorted { $0.frame.minX < $1.frame.minX }
+            guard bgs.count >= 2 else { return }
+            leading = bgs[0]
+            trailing = bgs[1]
+            splitDivider = divider
+            titlebarLeadingBackground = leading
+            titlebarTrailingBackground = trailing
+        }
+
+        guard let divider, let leading, let trailing, let titlebar = leading.superview else { return }
+
+        let split = divider.convert(divider.bounds, to: titlebar)
+        let y = leading.frame.minY
+        let h = leading.frame.height
+
+        let leadingWidth = max(0, split.minX)
+        if abs(leading.frame.width - leadingWidth) > 0.5 || abs(leading.frame.minX) > 0.5 {
+            leading.frame = NSRect(x: 0, y: y, width: leadingWidth, height: h)
+        }
+
+        let trailingX = split.maxX
+        let trailingWidth = max(0, titlebar.bounds.width - trailingX)
+        if abs(trailing.frame.minX - trailingX) > 0.5 || abs(trailing.frame.width - trailingWidth) > 0.5 {
+            trailing.frame = NSRect(x: trailingX, y: y, width: trailingWidth, height: h)
+        }
+    }
+
+    private func subviews(in view: NSView, matching: (String) -> Bool) -> [NSView] {
+        var found: [NSView] = []
+        let name = NSStringFromClass(type(of: view))
+        if matching(name) { found.append(view) }
+        for child in view.subviews {
+            found.append(contentsOf: subviews(in: child, matching: matching))
+        }
+        return found
     }
 
     /// 居中到含菜单栏那块屏（frame 原点为 (0,0) 的那块）。
@@ -173,6 +284,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             model.settings.windowPositionIsUserChosen = true
             try? model.settings.save()
         }
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === mainWindow else { return }
+        hideTitlebarSplitBlocker(force: true)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === mainWindow else { return }
+        hideTitlebarSplitBlocker(force: true)
+    }
+
+    /// 侧边栏拖宽不改窗口尺寸，但会触发布局；在这里把可能被重建的 blocker 再藏一次。
+    func windowDidUpdate(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === mainWindow else { return }
+        // 已缓存则只纠正 alpha；未缓存时限频搜索，避免每帧扫树。
+        hideTitlebarSplitBlocker(allowSearch: titlebarSplitBlocker == nil)
     }
 
     func windowWillClose(_ notification: Notification) {
