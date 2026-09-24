@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import HelperProtocol
 
 /// mihomo 内核进程的生命周期管理。
 ///
@@ -108,15 +109,28 @@ final class Kernel: ObservableObject {
             Self.appendLog("=== start privileged=\(privileged) port=\(freePort) config=\(config.path) ===")
 
             if privileged {
-                let pid = try Privileged.spawnAsRoot(
-                    executable: binary,
-                    arguments: args,
-                    logPath: Paths.kernelLog.path,
-                    workingDirectory: dataDir.path
-                )
-                rootPID = pid
+                // 提权模式：交给常驻 root 助手。
+                // 助手本身就是 root，直接 spawn 并持有 Process 句柄，
+                // 不再需要 osascript、pid 回显、花括号重定向那一套。
+                let kernelPath = try HelperInstaller.stageKernelForHelper()
+                _ = kernelPath
+
+                var req = Helper.Request(cmd: .startKernel)
+                req.protocolVersion = Helper.protocolVersion
+                req.config = config.path
+                req.dataDir = dataDir.path
+                req.uiDir = uiDir?.path
+                req.logPath = Paths.kernelLog.path
+                req.port = freePort
+                req.secret = secret
+
+                let resp = try HelperSocket.call(req)
+                guard let raw = resp.pid, raw > 0 else {
+                    throw KernelError.helper("助手未返回内核 pid")
+                }
+                rootPID = pid_t(raw)
                 isPrivileged = true
-                Self.appendLog("=== privileged pid=\(pid) ===")
+                Self.appendLog("=== 助手已启动内核 pid=\(raw) ===")
             } else {
                 let handle = try openLogHandle()
                 logHandle = handle
@@ -174,16 +188,14 @@ final class Kernel: ObservableObject {
         }
         status = .stopping
 
-        if let pid {
-            // 提权进程：我们只有发送信号的权限，身份是 root 所以每次都要走 osascript
-            try? Privileged.signal(pid, SIGTERM)
-            let deadline = Date().addingTimeInterval(3)
-            while Privileged.processExists(pid) && Date() < deadline {
-                usleep(80_000)
-            }
-            if Privileged.processExists(pid) {
-                Self.appendLog("!!! SIGTERM 超时，改用 SIGKILL")
-                try? Privileged.signal(pid, SIGKILL)
+        if rootPID != nil {
+            // 助手内部会 SIGTERM → 等 5s → SIGKILL，调用返回时已经收干净
+            var req = Helper.Request(cmd: .stopKernel)
+            req.protocolVersion = Helper.protocolVersion
+            do {
+                _ = try HelperSocket.call(req)
+            } catch {
+                Self.appendLog("!!! 通过助手停止内核失败：\(error)")
             }
         } else if let proc {
             proc.terminate()   // SIGTERM
@@ -207,9 +219,12 @@ final class Kernel: ObservableObject {
     /// 用户态的退出由 `terminationHandler` 处理，这里是兜底。
     func refreshLiveness() {
         guard status.isRunning else { return }
-        if let pid = rootPID {
-            if !Privileged.processExists(pid) {
-                Self.appendLog("=== privileged kernel \(pid) 已消失 ===")
+        if rootPID != nil {
+            var req = Helper.Request(cmd: .kernelStatus)
+            req.protocolVersion = Helper.protocolVersion
+            guard let resp = try? HelperSocket.call(req) else { return }
+            if resp.running != true {
+                Self.appendLog("=== 助手报告内核已退出 ===")
                 cleanup()
                 status = .stopped
             }
@@ -245,27 +260,18 @@ final class Kernel: ObservableObject {
 
     /// 处理上一次运行遗留的实例。
     ///
-    /// 提权内核被 launchd 接管，GUI 退出后仍在跑 —— 重新启动 GUI 时必须先收掉它，
-    /// 否则 TUN 接口和端口会冲突（表现为「启动了但没效果」）。
+    /// 提权内核由 launchd 托管的助手持有，**不随 GUI 退出**。
+    /// 助手会自己记着 pid（`kernel.pid`），它的 `start` 已经内含
+    /// 「已有内核就先停掉」的逻辑，所以这里只需要询问一次。
     private func adoptOrReapLeftover() async {
-        guard let data = try? Data(contentsOf: Paths.runtimeInfo),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let raw = obj["pid"] as? Int, raw > 0 else { return }
-        let pid = pid_t(raw)
-        guard Privileged.processExists(pid) else {
-            try? FileManager.default.removeItem(at: Paths.runtimeInfo)
-            return
-        }
+        var req = Helper.Request(cmd: .kernelStatus)
+        req.protocolVersion = Helper.protocolVersion
+        guard let resp = try? HelperSocket.call(req), resp.running == true,
+              let pid = resp.pid else { return }
         Self.appendLog("=== 收掉上次遗留的提权内核 pid=\(pid) ===")
-        try? Privileged.signal(pid, SIGTERM)
-        let deadline = Date().addingTimeInterval(3)
-        while Privileged.processExists(pid) && Date() < deadline {
-            usleep(80_000)
-        }
-        if Privileged.processExists(pid) {
-            try? Privileged.signal(pid, SIGKILL)
-        }
-        try? FileManager.default.removeItem(at: Paths.runtimeInfo)
+        var stop = Helper.Request(cmd: .stopKernel)
+        stop.protocolVersion = Helper.protocolVersion
+        _ = try? HelperSocket.call(stop)
     }
 
     // MARK: - 日志
@@ -410,6 +416,7 @@ enum KernelError: Error, CustomStringConvertible {
     case noFreePort
     case configInvalid(String)
     case notReady(String)
+    case helper(String)
 
     var description: String {
         switch self {
@@ -419,6 +426,8 @@ enum KernelError: Error, CustomStringConvertible {
             return "配置预检失败：\(detail)"
         case .notReady(let log):
             return "内核未在超时内就绪。\n最近日志：\n\(log)"
+        case .helper(let m):
+            return m
         }
     }
 }

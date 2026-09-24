@@ -9,7 +9,9 @@ import AppKit
 struct MihomoBarApp {
     @MainActor
     static func main() {
-        if CommandLine.arguments.contains("--selftest") {
+        let args = CommandLine.arguments
+        if HelperCLI.run(args) { return }
+        if args.contains("--selftest") {
             SelfTest.run()
             return
         }

@@ -1,13 +1,12 @@
 import Foundation
+import HelperProtocol
 
 /// 需要 root 的操作。
 ///
-/// macOS 上 `networksetup -setwebproxy` 和 TUN 模式都需要管理员权限。
-/// 这里用 `osascript ... with administrator privileges` 弹出一次系统授权框；
-/// 优点是零签名成本、立刻可用，缺点是重启后需要重新授权一次。
-///
-/// 后续如果要免去反复授权，再换成 `SMAppService` 注册 LaunchDaemon helper
-/// （Clash Verge 的做法）。接口保持不变即可平滑替换。
+/// **常态路径是特权助手**（见 `HelperInstaller`）：一次授权安装，之后零弹框。
+/// 这里的 `osascript ... with administrator privileges` 只用于两件事：
+/// 1. 安装/卸载助手本身
+/// 2. 助手尚未安装时的降级路径（会弹授权框，支持触控 ID）
 enum Privileged {
 
     /// 通过 osascript 以管理员身份执行一段 shell。
@@ -90,6 +89,19 @@ enum Privileged {
         return "{ \(body); } >> \(shellQuote(logPath)) 2>&1 < /dev/null & echo $!"
     }
 
+    /// 一次性完成多个需要 root 的动作，**只弹一次授权框**。
+    ///
+    /// 安装助手、以及未装助手时的系统代理降级路径都要用这个 ——
+    /// 分开调用会弹好几次框。
+    static func runBatch(_ commands: [String]) throws {
+        let script = commands
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " && ")
+        guard !script.isEmpty else { return }
+        try runShell(script)
+    }
+
     /// 给提权进程发信号。内核必须收到 SIGTERM 而不是 SIGKILL，
     /// 否则 TUN 模式会残留 utun 接口和路由。
     static func signal(_ pid: pid_t, _ sig: Int32) throws {
@@ -157,39 +169,45 @@ enum SystemProxy {
         return false
     }
 
-    /// 一次授权完成所有服务的开启：http + https + socks 指向本地内核。
-    static func enable(port: Int, bypass: [String] = defaultBypass) throws {
-        let services = activeServices()
-        guard !services.isEmpty else { throw SystemProxyError.noService }
-
-        var lines: [String] = []
-        for s in services {
-            let q = "\"\(s)\""
-            lines += [
-                "/usr/sbin/networksetup -setwebproxy \(q) 127.0.0.1 \(port)",
-                "/usr/sbin/networksetup -setsecurewebproxy \(q) 127.0.0.1 \(port)",
-                "/usr/sbin/networksetup -setsocksfirewallproxy \(q) 127.0.0.1 \(port)",
-                "/usr/sbin/networksetup -setproxybypassdomains \(q) \(bypass.joined(separator: " "))",
-            ]
+    /// 开关系统代理。
+    ///
+    /// 装了助手就走 socket（零弹框）；没装则降级到 osascript（弹一次授权框）。
+    static func set(enabled: Bool, port: Int) throws {
+        if HelperInstaller.isInstalled {
+            var req = Helper.Request(cmd: .setSystemProxy)
+            req.protocolVersion = Helper.protocolVersion
+            req.enabled = enabled
+            req.port = port
+            _ = try HelperSocket.call(req)
+            return
         }
-        // 合并成一条 shell，只弹一次密码框
-        try Privileged.runShell(lines.joined(separator: " && "))
+        try legacySet(enabled: enabled, port: port)
     }
 
-    static func disable() throws {
+    /// 降级路径：一次性把各服务的改动合并成一条 shell，只弹一次授权框。
+    private static func legacySet(enabled: Bool, port: Int) throws {
         let services = activeServices()
         guard !services.isEmpty else { throw SystemProxyError.noService }
 
         var lines: [String] = []
         for s in services {
             let q = "\"\(s)\""
-            lines += [
-                "/usr/sbin/networksetup -setwebproxystate \(q) off",
-                "/usr/sbin/networksetup -setsecurewebproxystate \(q) off",
-                "/usr/sbin/networksetup -setsocksfirewallproxystate \(q) off",
-            ]
+            if enabled {
+                lines += [
+                    "/usr/sbin/networksetup -setwebproxy \(q) 127.0.0.1 \(port)",
+                    "/usr/sbin/networksetup -setsecurewebproxy \(q) 127.0.0.1 \(port)",
+                    "/usr/sbin/networksetup -setsocksfirewallproxy \(q) 127.0.0.1 \(port)",
+                    "/usr/sbin/networksetup -setproxybypassdomains \(q) \(defaultBypass.joined(separator: " "))",
+                ]
+            } else {
+                lines += [
+                    "/usr/sbin/networksetup -setwebproxystate \(q) off",
+                    "/usr/sbin/networksetup -setsecurewebproxystate \(q) off",
+                    "/usr/sbin/networksetup -setsocksfirewallproxystate \(q) off",
+                ]
+            }
         }
-        try Privileged.runShell(lines.joined(separator: " && "))
+        try Privileged.runBatch(lines)
     }
 
     /// 本机/局域网地址不走代理，否则会出现回环问题

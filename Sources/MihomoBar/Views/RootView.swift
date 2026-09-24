@@ -103,7 +103,9 @@ struct RootView: View {
             )) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("系统代理")
-                    Text("需要管理员授权 · 127.0.0.1:\(String(model.settings.mixedPort))")
+                    Text(model.helperInstalled
+                         ? "127.0.0.1:\(String(model.settings.mixedPort)) · 不弹授权框"
+                         : "127.0.0.1:\(String(model.settings.mixedPort)) · 首次需授权")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -347,15 +349,22 @@ struct RootView: View {
 
             Divider()
 
+            helperSection
+
+            Divider()
+
             Toggle(isOn: $model.settings.tunEnabled) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("TUN 模式")
-                    Text("启动内核时会请求管理员授权，以 root 运行")
+                    Text(model.helperInstalled
+                         ? "以 root 运行内核，接管全部流量。已装助手，不弹授权框"
+                         : "需要先安装特权助手")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
             }
             .toggleStyle(.switch)
+            .disabled(!model.helperInstalled)
 
             Toggle(isOn: Binding(
                 get: { model.launchAtLogin },
@@ -383,6 +392,40 @@ struct RootView: View {
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var helperSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: model.helperRunning ? "checkmark.shield.fill" : "shield")
+                    .foregroundStyle(model.helperRunning ? .green : .secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("特权助手")
+                    Text(model.helperRunning
+                         ? "已安装并运行，特权操作不再弹授权框"
+                         : (model.helperInstalled ? "已安装但未运行" : "未安装"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if model.helperRunning {
+                    Button("卸载") { Task { await model.uninstallHelper() } }
+                        .font(.caption2)
+                        .disabled(model.busy)
+                } else {
+                    Button("安装") { Task { await model.installHelper() } }
+                        .font(.caption2)
+                        .disabled(model.busy)
+                }
+            }
+            Text("安装时会弹一次系统授权（可用触控 ID）。之后 TUN 开关、系统代理都不再需要授权。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
     }
 
     // MARK: - 提示条

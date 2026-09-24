@@ -23,6 +23,14 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp ".build/release/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 
+# 特权助手单独一个二进制，由用户从设置里手动安装到 /Library/PrivilegedHelperTools。
+# 它不会随 app 自动获得 root，必须显式安装（那一步弹一次授权）。
+if [ -x ".build/release/MihomoBarHelper" ]; then
+  cp ".build/release/MihomoBarHelper" "$APP/Contents/MacOS/MihomoBarHelper"
+else
+  echo "!! 缺少 MihomoBarHelper，TUN 模式将不可用" >&2
+fi
+
 # 内核与面板作为普通资源随包分发；首次启动时复制到 Application Support 再执行
 if [ -x "Resources/mihomo" ]; then
   cp "Resources/mihomo" "$APP/Contents/Resources/mihomo"
@@ -60,6 +68,11 @@ PLIST
 
 echo "==> 签名"
 IDENTITY="${SIGN_IDENTITY:--}"
+# 先签内层再签外层（code signing 的顺序不能反）
+if [ -x "$APP/Contents/MacOS/MihomoBarHelper" ]; then
+  codesign --force --sign "$IDENTITY" "$APP/Contents/MacOS/MihomoBarHelper" 2>&1 | grep -v "replacing existing" || true
+fi
+codesign --force --sign "$IDENTITY" "$APP/Contents/MacOS/$APP_NAME" 2>&1 | grep -v "replacing existing" || true
 if [ "$IDENTITY" = "-" ]; then
   codesign --force --deep --sign - "$APP" 2>&1 | grep -v "replacing existing signature" || true
 else

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import HelperProtocol
 
 /// 应用唯一的共享状态中心。
 ///
@@ -26,6 +27,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var launchAtLogin: Bool = false
     @Published private(set) var providerInfo: String?
     @Published private(set) var busy: Bool = false
+    @Published private(set) var helperInstalled = false
+    @Published private(set) var helperRunning = false
 
     @Published var settings: Settings
     @Published var banner: Banner?
@@ -55,6 +58,8 @@ final class AppModel: ObservableObject {
         settings = Settings.load()
         systemProxyOn = SystemProxy.isEnabled()
         launchAtLogin = LaunchAtLogin.isEnabled
+        helperInstalled = HelperInstaller.isInstalled
+        helperRunning = HelperInstaller.isRunning
         status = kernel.status
         loadKernelVersion()
     }
@@ -91,6 +96,17 @@ final class AppModel: ObservableObject {
     }
 
     func startKernel() async {
+        let privileged = settings.tunEnabled
+
+        // TUN 必须由 root 助手启动内核；没装助手就只能拒绝，
+        // 而不是静默回退到用户态 —— 那样 TUN 不会生效但用户不知道
+        if privileged && !HelperInstaller.isInstalled {
+            let msg = "TUN 模式需要特权助手。请到设置里点「安装特权助手」后重试。"
+            status = .failed(msg)
+            banner = Banner(text: msg, isError: true)
+            return
+        }
+
         busy = true
         defer { busy = false }
         do {
@@ -98,8 +114,12 @@ final class AppModel: ObservableObject {
             let ui = try Bundled.ensureUI()
             let config = try ConfigWriter.resolvedConfig(for: settings)
 
-            // TUN 必须 root：接口创建、路由改写都在内核内部做
-            let privileged = settings.tunEnabled
+            // 提权模式下配置文件由用户可写，而内核以 root 读它。
+            // mihomo 会以 root 执行配置里的 post-up / post-down，必须先告知。
+            if privileged, let risk = Self.privilegedConfigRisk(config) {
+                banner = Banner(text: risk, isError: true)
+                return
+            }
 
             await kernel.start(config: config,
                                binary: binary,
@@ -112,10 +132,6 @@ final class AppModel: ObservableObject {
             } else {
                 needsRestart = false
                 await refreshRuntime()
-                if privileged {
-                    banner = Banner(text: "内核已以 root 运行（TUN 模式）。提权进程不随本应用退出，退出后请用「停止内核」收尾。",
-                                    isError: false)
-                }
             }
         } catch {
             let msg = String(describing: error)
@@ -124,17 +140,23 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 提权运行时，配置里的 `post-up` / `post-down` 会被内核以 root 身份执行。
+    /// 生成的配置永远不会带这两项，但用户指定的自定义配置可能会。
+    private static func privilegedConfigRisk(_ url: URL) -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let found = ["post-up:", "post-down:"].filter { text.contains($0) }
+        guard !found.isEmpty else { return nil }
+        return "配置中含 \(found.joined(separator: "、"))，TUN 模式下内核以 root 运行，"
+             + "这些脚本会以 root 身份执行任意命令。请确认配置来源可信后再继续。"
+    }
+
     // MARK: - 系统代理
 
     func setSystemProxy(_ on: Bool) async {
         busy = true
         defer { busy = false }
         do {
-            if on {
-                try SystemProxy.enable(port: settings.mixedPort)
-            } else {
-                try SystemProxy.disable()
-            }
+            try SystemProxy.set(enabled: on, port: settings.mixedPort)
             systemProxyOn = on
             banner = Banner(text: on ? "系统代理已开启 → 127.0.0.1:\(settings.mixedPort)" : "系统代理已关闭",
                             isError: false)
@@ -233,6 +255,43 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - 特权助手
+
+    /// 安装助手。**整个应用只在这里弹一次授权框**（支持触控 ID）。
+    /// 装完之后 TUN 与系统代理都走 socket，不再有任何弹框。
+    func installHelper() async {
+        busy = true
+        defer { busy = false }
+        do {
+            _ = try HelperInstaller.install()
+            helperInstalled = HelperInstaller.isInstalled
+            helperRunning = HelperInstaller.isRunning
+            banner = Banner(text: "特权助手已安装。之后开关 TUN 和系统代理都不会再弹授权框。",
+                            isError: false)
+        } catch {
+            helperInstalled = HelperInstaller.isInstalled
+            helperRunning = HelperInstaller.isRunning
+            banner = Banner(text: String(describing: error), isError: true)
+        }
+    }
+
+    func uninstallHelper() async {
+        if kernel.status.isRunning && kernel.isPrivileged {
+            banner = Banner(text: "内核正以 root 运行，请先停止内核再卸载助手", isError: true)
+            return
+        }
+        busy = true
+        defer { busy = false }
+        do {
+            try HelperInstaller.uninstall()
+            helperInstalled = HelperInstaller.isInstalled
+            helperRunning = false
+            banner = Banner(text: "助手已卸载，特权操作会退回为每次弹授权框", isError: false)
+        } catch {
+            banner = Banner(text: String(describing: error), isError: true)
+        }
+    }
+
     // MARK: - 设置
 
     func saveSettings(_ s: Settings) {
@@ -285,6 +344,8 @@ final class AppModel: ObservableObject {
 
         systemProxyOn = SystemProxy.isEnabled()
         launchAtLogin = LaunchAtLogin.isEnabled
+        helperInstalled = HelperInstaller.isInstalled
+        helperRunning = HelperInstaller.isRunning
 
         guard let ctl else {
             groups = []

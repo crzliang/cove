@@ -1,5 +1,23 @@
 import Foundation
 import AppKit
+import Darwin
+import HelperProtocol
+
+/// 取进程的属主用户名。用来确认提权内核真的是 root 跑的。
+func processOwner(_ pid: pid_t) -> String {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/ps")
+    p.arguments = ["-o", "user=", "-p", "\(pid)"]
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = Pipe()
+    p.standardInput = FileHandle.nullDevice
+    guard (try? p.run()) != nil else { return "?" }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return (String(data: data, encoding: .utf8) ?? "?")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
 
 /// Headless 自检：`MihomoBar --selftest`
 ///
@@ -145,6 +163,56 @@ enum SelfTest {
             check("进程存活检测（不存在的 pid）", !Privileged.processExists(999_999))
             check("开机自启可用性判断", LaunchAtLogin.isAvailable == Bundle.main.bundlePath.hasSuffix(".app"),
                   LaunchAtLogin.statusDescription)
+
+            // 9b. 特权助手
+            check("助手协议版本一致", Helper.protocolVersion == 2, "v\(Helper.protocolVersion)")
+            check("助手二进制已打包", HelperInstaller.bundledHelperPath() != nil,
+                  HelperInstaller.bundledHelperPath()?.path ?? "未找到（开发时用 swift run 属正常）")
+            check("助手安装状态可查", HelperInstaller.isInstalled == FileManager.default.isExecutableFile(atPath: Helper.installedPath),
+                  HelperInstaller.isInstalled ? "已安装" : "未安装")
+            if HelperInstaller.isInstalled {
+                let running = HelperInstaller.isRunning
+                check("助手可应答 ping", running, running ? "正常运行" : "未运行（重启后由 launchd 拉起）")
+                if running {
+                    var req = Helper.Request(cmd: .kernelStatus)
+                    req.protocolVersion = Helper.protocolVersion
+                    if let resp = try? HelperSocket.call(req) {
+                        check("助手可查询内核状态", true, resp.running == true ? "内核在跑" : "内核未跑")
+                    } else {
+                        check("助手可查询内核状态", false)
+                    }
+
+                    // 真正验证提权路径：让助手以 root 启动内核
+                    print("  … 通过助手以 root 启动内核")
+                    let helperKernel = Kernel()
+                    await helperKernel.start(config: config,
+                                             binary: kernel,
+                                             dataDir: Paths.dataDir,
+                                             uiDir: ui,
+                                             privileged: true)
+                    if helperKernel.status.isRunning {
+                        check("助手以 root 启动内核", true, ":\(helperKernel.port)")
+                        check("内核标记为提权", helperKernel.isPrivileged)
+
+                        // 关键：确认内核进程真的是 root，而不是默默回退成普通用户
+                        if let pid = helperKernel.runningPID {
+                            let owner = processOwner(pid)
+                            check("内核进程确实以 root 运行", owner == "root", "owner=\(owner)")
+                        }
+                        if let url = helperKernel.endpoint {
+                            let ctl = CtlClient(base: url, secret: helperKernel.secret)
+                            let v = try? await ctl.version()
+                            check("提权内核 API 可达", v != nil, v?.version ?? "无响应")
+                        }
+                        helperKernel.stop()
+                        check("提权内核已停止", !helperKernel.status.isRunning)
+                    } else {
+                        check("助手以 root 启动内核", false, helperKernel.lastError ?? "未知")
+                    }
+                }
+            } else {
+                print("  ℹ️  助手未安装，跳过提权路径测试（可在应用设置里安装）")
+            }
 
             let probeLog = Paths.root.appendingPathComponent("spawn-probe.log")
             let probeCmd = Privileged.buildBackgroundCommand(

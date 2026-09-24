@@ -59,27 +59,48 @@ mihomo -d <datadir> -f <用户配置> \
 面板是 **响应式 PWA** —— 手机连同一个地址（需开 `allow-lan`）就是第二个客户端。
 多客户端能力由内核提供，不需要自己实现。
 
-### 6. TUN 模式需要 root，走 osascript 提权
+### 6. 特权操作交给常驻 root 助手，只授权一次
 
-内核以 root 启动的方式：
+**整个应用只有一次授权弹框**，发生在安装助手时。之后 TUN 开关、系统代理
+全部走 unix socket 到 root 助手，不再有任何提示 —— 指纹和密码都不需要。
 
-```sh
-do shell script "{ cd <dir> && <mihomo> <args>; } >> <log> 2>&1 < /dev/null & echo $!" \
-  with administrator privileges
+```
+MihomoBar (用户)
+     │  unix socket  /var/run/local.mihomobar/helper.sock  (root:admin 0660)
+     ▼
+MihomoBarHelper (root, launchd 常驻)          ← launchd 拉起，KeepAlive
+     ├── spawn mihomo 并持有 Process 句柄       ← 不再需要 osascript
+     └── networksetup 开关系统代理
 ```
 
-两个必须踩对的点（都有自检盯着）：
+安装只需要一次提权 shell：
 
-1. **整条命令要用 `{ …; }` 包住再重定向**。如果只给最后一个命令加重定向
-   （`cd X && mihomo … >> log &`），后台子 shell 会继续持有调用方的 stdout，
-   `do shell script` 会阻塞到内核退出 —— 对内核来说就是永远。
-   实测：错误写法 30019 ms，正确写法 9 ms。
-2. **末尾 `echo $!`** 是唯一能从提权 shell 里拿回 pid 的方式。
+```
+install -m 755 -o root -g wheel  <app>/Contents/MacOS/MihomoBarHelper \
+                                  /Library/PrivilegedHelperTools/local.mihomobar.helper
+install -m 644 -o root -g wheel  local.mihomobar.helper.plist \
+                                 /Library/LaunchDaemons/
+launchctl bootstrap system /Library/LaunchDaemons/local.mihomobar.helper.plist
+```
 
-提权内核被 launchd 接管，**不随 GUI 退出**。所以：
+**为什么不用 `SMAppService.daemon`**：它要求应用带 Apple 开发者证书签名
+（需要 Team Identifier）。实测自签名证书返回
+`SMAppServiceErrorDomain Code=1 "Operation not permitted"`。传统路径效果一样且不挑签名。
 
-* 退出时会提示内核是否真的收干净了，没收干净会弹窗告警（避免留个 root 进程占着 TUN 路由）
-* 下次启动时 `adoptOrReapLeftover()` 先收掉上次遗留的实例
+安全边界：
+
+* socket 是 `root:admin 0660` —— 只有 root 与管理员组成员能连
+* 助手再用 `getpeereid()` 做第二道校验
+* 内核二进制另外装一份到 root 专属目录。**不能直接执行 Application Support
+  里的那份** —— 那个目录用户可写，任何能写它的进程都能换掉内核从而拿到 root 执行
+* 提权模式下会检查配置里有没有 `post-up` / `post-down` —— 内核会以 root
+  执行它们，存在就直接拒绝启动并提示
+
+助手自身也踩过两个坑（都在代码注释里）：
+
+1. **socket 组必须是 admin 而不是默认的 daemon**。launchd 拉起的进程 gid 是
+   daemon，普通用户不在该组里，症状是「助手在跑但连不上」
+2. `launchctl bootstrap` 到 socket 可连有时要几秒，安装后的探测窗口不能太短
 
 ### 7. 开机自启用 SMAppService
 
@@ -127,31 +148,38 @@ open build/MihomoBar.app
 ./.build/debug/MihomoBar --selftest
 ```
 
-33 项，覆盖：资源定位 → 生成配置 → 分配端口 → `-t` 预检 → 启动 →
+40+ 项，覆盖：资源定位 → 生成配置 → 分配端口 → `-t` 预检 → 启动 →
 `/version` `/configs` `/proxies` `/providers/proxies` → 切模式 → 重载 →
-面板可达 → `runtime.json` → 提权命令构造与后台启动机制 → SIGTERM 优雅停止 →
-清理 socket → 日志非空。
+面板可达 → `runtime.json` → 提权命令构造 → SIGTERM 优雅停止 → 清理 socket →
+日志非空。
 
-不做任何系统级改动，不弹授权框。
+助手已安装时还会做真正的提权端到端验证：让助手以 root 启动内核，
+用 `ps -o user=` **确认进程属主真的是 root**，再验证 API 可达并干净停止。
 
-自检已实际抓出过两个 bug：资源目录被整个当成内核拷贝、提权重定向写法导致阻塞 30 秒。
+自检已实际抓出三个 bug：资源目录被整个当成内核拷贝、提权重定向写法导致阻塞 30 秒、
+以及助手 socket 组不对导致连不上。
+
+```bash
+# 助手相关（都需要在 .app 内运行）
+MihomoBar --install-helper     # 安装（弹一次授权）
+MihomoBar --uninstall-helper
+MihomoBar --helper-status
+```
 
 ---
 
 ## 权限模型
 
-| 操作 | 是否需要 root |
-|---|---|
-| 启动内核（代理端口模式） | 否 |
-| 打开浏览器面板 | 否 |
-| **系统代理开关** | **是**（`networksetup -setwebproxy`） |
-| **TUN 模式** | **是**（内核本身要 root） |
+| 操作 | 需要 root | 授权次数 |
+|---|---|---|
+| 启动内核（代理端口模式） | 否 | — |
+| 打开浏览器面板 | 否 | — |
+| **安装特权助手** | 是 | **一次**（可用触控 ID） |
+| **系统代理开关** | 是 | 0（走助手） |
+| **TUN 模式** | 是 | 0（走助手） |
 
-两条路径都走 `osascript ... with administrator privileges`，零签名成本、立刻可用。
-代价是重启后需要重新授权一次（授权缓存约 5 分钟）。
-
-将来要免去反复授权，可换成 `SMAppService` 注册 LaunchDaemon helper
-（Clash Verge 的做法）。`Privileged.swift` 的接口已为此预留，可平滑替换。
+**没装助手时**会降级到 `osascript ... with administrator privileges`，
+每次操作弹一次框（支持触控 ID）。装了助手就彻底告别弹框。
 
 ---
 
