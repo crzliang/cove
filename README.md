@@ -12,13 +12,53 @@ GUI 本体      ~1.3 MB（release）
 
 ## 设计要点
 
-### 0. 形态：独立主窗口 + 菜单栏并存
+### 0. 形态：独立主窗口 + 菜单栏下拉菜单
 
-启动时打开主窗口（`520×720`，可拉伸），同时保留菜单栏图标用于快速开关。
-Dock 图标可在设置里关掉，关掉后窗口收起，退化成纯菜单栏应用。
+两处入口，各司其职：
 
-窗口位置用 `setFrameAutosaveName` 记忆，但恢复前会做一次**可见性校验** ——
-显示器拔插或分辨率变化后，旧坐标可能落在屏幕外，那样窗口看起来就像“根本没启动”。
+| | 内容 | 适合 |
+|---|---|---|
+| **主窗口**（880×620） | 导航分栏 + 工具栏 + 状态栏，五个页面 | 配置、看节点、查日志 |
+| **菜单栏下拉菜单** | 原生 `NSMenu`，约 10 个条目 | 扫一眼状态、开关代理、切模式 |
+
+菜单栏刻意用**原生下拉菜单**而不是自绘 popover 面板：菜单位置本来就适合
+条目式列表，原生菜单更快、更符合系统习惯，也不用为「点开—点关」维护额外状态。
+菜单内容在 `menuNeedsUpdate` 里按当前状态重建，不需要额外同步逻辑。
+
+```
+MihomoBar · 运行中 :63415          ← 只读状态，扫一眼用
+↓ 1.2 MB/s    ↑ 340 KB/s
+──────────────
+停止内核
+系统代理                      ✓
+模式                        ▸  规则 / 全局 / 直连
+打开浏览器面板
+重载配置
+──────────────
+显示主窗口
+数据目录
+──────────────
+退出 MihomoBar               ⌘Q
+```
+
+窗口定位规则很简单：
+
+* 用户**拖过**窗口 → 记住位置（只要还在某块屏幕上）
+* 用户**没拖过** → 居中到主屏
+
+两条必须避开的坑（都是实测踩出来的）：
+
+1. **不要用 `.moveToActiveSpace`**。它看起来能解决「应用在别的 Space 被拉起时
+   窗口看不见」，但在多显示器下「活动 Space」可能是另一块屏，结果是窗口被送到
+   用户没在看的地方。
+2. **`windowDidMove` 要加稳定期**。autosave 的恢复本身就会触发一次 windowDidMove，
+   照单全收会把应用自己恢复出来的坐标当成「用户的选择」存下来，
+   然后就永远卡在那块屏上。
+
+另外**不要用启发式判断「是不是开机自启拉起的」**，两条路都试过且都不可靠：
+`NSAppleEventManager.currentAppleEvent`（`open` 启动时为 nil）、
+`NSApplicationLaunchIsDefaultLaunchKey`（终端启动时也是 false）。
+改为给用户一个「启动时打开窗口」开关，开启开机自启时自动关掉它。
 
 ### 1. 内核是独立子进程，不是链接进来的库
 
@@ -174,6 +214,11 @@ open build/MihomoBar.app
 MihomoBar --install-helper     # 安装（弹一次授权）
 MihomoBar --uninstall-helper
 MihomoBar --helper-status
+
+# 界面相关（都不需要点开 GUI）
+MihomoBar --render-panes [目录]  # 六个视图离屏渲染成 PNG，检查有无空白/崩溃
+MihomoBar --dump-menu            # 打印菜单栏下拉菜单结构
+MihomoBar --dump-menu running    # 先起内核，再看「运行中」状态的菜单
 ```
 
 ---
@@ -209,17 +254,24 @@ open /Applications/MihomoBar.app
 
 ```
 Sources/MihomoBar/
-  App.swift            入口（@main），含 --selftest 分支
-  AppDelegate.swift    NSStatusItem + NSPopover + 右键菜单 + 退出收尾
+  App.swift            入口（@main），各 CLI 分支分发
+  AppDelegate.swift    菜单栏下拉菜单 + 主窗口 + 退出收尾
   AppModel.swift       共享状态（刻意不用 @State）
   Kernel.swift         进程生命周期 / 提权启动 / 端口 / 预检 / 日志
   CtlClient.swift      external-controller REST 客户端
+  TrafficMonitor.swift /traffic 流式读取 + 重连
   Privileged.swift     osascript 提权 + networksetup + 异步启动机制
+  HelperInstaller.swift 特权助手的安装/卸载
   LaunchAtLogin.swift  SMAppService 开机自启
-  ConfigWriter.swift   生成配置（永不写用户配置）
+  ConfigWriter.swift   Settings + 生成配置（永不写用户配置）
   Bundled.swift        资源定位与内核副本
-  SelfTest.swift       headless 自检（33 项）
-  Views/RootView.swift 弹出面板
+  SelfTest.swift       headless 自检
+  PaneRenderer.swift   离屏渲染检查
+  MenuDump.swift       菜单结构检查
+  Views/
+    MainWindow.swift   导航分栏 + 工具栏 + 状态栏
+    DesignSystem.swift Card / InfoRow / StatTile 等基础组件
+    Panes/             概览 / 节点 / 订阅 / 日志 / 设置
 
 Resources/             mihomo + ui/（gitignore，用脚本获取）
 scripts/fetch-kernel.sh

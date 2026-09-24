@@ -3,10 +3,9 @@ import SwiftUI
 import Combine
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
     private var mainWindow: NSWindow?
     /// 程序化移动窗口时置位，避免被 windowDidMove 误判成「用户拖动」
     private var isPositioningProgrammatically = false
@@ -18,6 +17,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var windowSettled = false
     private var cancellables = Set<AnyCancellable>()
     private let model = AppModel()
+
+    // 仅供 --dump-menu 使用
+    var kernelForDump: Kernel { model.kernel }
+    var statusForDump: Kernel.Status { model.status }
+    /// 仅供 --dump-menu：把内核状态同步进去，否则菜单里永远显示「已停止」
+    func syncStatusForDump() { model.syncStatusFromKernel() }
+
+    var dumpState: String {
+        var s = model.status.label
+        if model.systemProxyOn { s += " · 系统代理开" }
+        s += " · 模式=\(model.mode)"
+        return s
+    }
 
     // MARK: - 启动
 
@@ -42,32 +54,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.setFrameAutosaveName("MihomoBarMainWindow")
         mainWindow = window
 
-        popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = false
-        popover.contentSize = NSSize(width: 340, height: 460)
-        popover.contentViewController = NSHostingController(
-            rootView: QuickPanel(model: model) { [weak self] in
-                self?.popover.performClose(nil)
-                self?.showMainWindow()
-            })
-
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "shield.lefthalf.filled",
                                    accessibilityDescription: "MihomoBar")
             button.image?.isTemplate = true
-            button.action = #selector(statusItemClicked(_:))
-            button.target = self
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        // 用原生下拉菜单而不是 popover 面板。
+        // 菜单栏这种位置，条目式列表比自绘面板更快、更符合系统习惯，
+        // 也不需要为「点开-点关」维护额外状态。
+        // 内容在 menuNeedsUpdate 里按当前状态重建。
+        let menu = NSMenu()
+        menu.delegate = self
+        menu.autoenablesItems = false
+        statusItem.menu = menu
 
         model.$status
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateIcon() }
             .store(in: &cancellables)
 
-        // popover 里的「打开主窗口」按钮
         model.onOpenMainWindow = { [weak self] in self?.showMainWindow() }
 
         // 只监听 showInDock 的变化（不用整个 settings，否则每敲一个字都会触发）
@@ -183,59 +189,108 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
 
-    // MARK: - 菜单栏
+    // MARK: - 菜单栏下拉菜单
 
-    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
-        guard let event = NSApp.currentEvent else { return }
-        if event.type == .rightMouseUp {
-            showContextMenu()
-        } else {
-            togglePopover()
+    /// 菜单每次打开时按当前状态重建，不需要额外同步。
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        // 顶部两行是只读状态，用于「扫一眼」
+        menu.addItem(disabled("MihomoBar · \(model.status.label)"))
+        if model.status.isRunning {
+            menu.addItem(disabled("↓ \(TrafficMonitor.rate(model.traffic.down))"
+                                  + "    ↑ \(TrafficMonitor.rate(model.traffic.up))"))
         }
-    }
+        menu.addItem(.separator())
 
-    private func togglePopover() {
-        guard let button = statusItem.button else { return }
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
-            NSApp.activate(ignoringOtherApps: true)
-        }
-    }
+        let power = action(model.status.isRunning ? "停止内核" : "启动内核",
+                           #selector(menuToggleKernel),
+                           symbol: model.status.isRunning ? "stop.fill" : "play.fill")
+        power.isEnabled = !model.status.isBusy && !model.busy
+        menu.addItem(power)
 
-    private func showContextMenu() {
-        let menu = NSMenu()
+        let proxy = action("系统代理", #selector(menuToggleProxy), symbol: "network")
+        proxy.state = model.systemProxyOn ? .on : .off
+        proxy.isEnabled = model.status.isRunning && !model.busy
+        menu.addItem(proxy)
 
-        let open = NSMenuItem(title: "打开主窗口", action: #selector(contextOpenWindow), keyEquivalent: "")
-        open.target = self
-        menu.addItem(open)
+        menu.addItem(modeSubmenu())
 
-        let toggleTitle = model.status.isRunning ? "停止内核" : "启动内核"
-        let toggle = NSMenuItem(title: toggleTitle, action: #selector(contextToggleKernel), keyEquivalent: "")
-        toggle.target = self
-        menu.addItem(toggle)
-
-        let dash = NSMenuItem(title: "打开面板", action: #selector(contextOpenDashboard), keyEquivalent: "")
-        dash.target = self
+        let dash = action("打开浏览器面板", #selector(menuOpenDashboard), symbol: "safari")
         dash.isEnabled = model.status.isRunning
         menu.addItem(dash)
 
-        menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出 MihomoBar", action: #selector(contextQuit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
+        let reload = action("重载配置", #selector(menuReload), symbol: "arrow.clockwise")
+        reload.isEnabled = model.status.isRunning && !model.busy
+        menu.addItem(reload)
 
-        statusItem.menu = menu
-        statusItem.button?.performClick(nil)
-        statusItem.menu = nil   // 用完即卸，否则左键也会弹菜单
+        menu.addItem(.separator())
+
+        menu.addItem(action("显示主窗口", #selector(menuShowWindow), symbol: "macwindow"))
+        menu.addItem(action("数据目录", #selector(menuRevealData), symbol: "folder"))
+        if model.needsRestart {
+            let restart = action("重启内核（设置已改）", #selector(menuRestart), symbol: "exclamationmark.arrow.triangle.2.circlepath")
+            restart.isEnabled = !model.busy && !model.status.isBusy
+            menu.addItem(restart)
+        }
+
+        menu.addItem(.separator())
+
+        let quit = action("退出 MihomoBar", #selector(menuQuit), symbol: "power")
+        quit.keyEquivalent = "q"
+        menu.addItem(quit)
     }
 
-    @objc private func contextOpenWindow() { showMainWindow() }
-    @objc private func contextToggleKernel() { Task { await model.toggleKernel() } }
-    @objc private func contextOpenDashboard() { model.openDashboard() }
-    @objc private func contextQuit() { NSApp.terminate(nil) }
+    private func disabled(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    private func action(_ title: String, _ selector: Selector, symbol: String? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+        item.target = self
+        item.isEnabled = true
+        if let symbol {
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        }
+        return item
+    }
+
+    private func modeSubmenu() -> NSMenuItem {
+        let parent = NSMenuItem(title: "模式", action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: nil)
+        let sub = NSMenu()
+        for (title, value) in [("规则", "rule"), ("全局", "global"), ("直连", "direct")] {
+            let item = NSMenuItem(title: title, action: #selector(menuSetMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = value
+            item.state = (model.mode == value) ? .on : .off
+            item.isEnabled = model.status.isRunning
+            sub.addItem(item)
+        }
+        parent.submenu = sub
+        parent.isEnabled = model.status.isRunning
+        return parent
+    }
+
+    @objc private func menuToggleKernel()   { Task { await model.toggleKernel() } }
+    @objc private func menuToggleProxy()    { Task { await model.setSystemProxy(!model.systemProxyOn) } }
+    @objc private func menuOpenDashboard()  { model.openDashboard() }
+    @objc private func menuReload()         { Task { await model.reloadConfig() } }
+    @objc private func menuShowWindow()     { showMainWindow() }
+    @objc private func menuRevealData()     { model.revealDataDir() }
+    @objc private func menuQuit()           { NSApp.terminate(nil) }
+    @objc private func menuRestart() {
+        Task {
+            await model.toggleKernel()
+            await model.startKernel()
+        }
+    }
+    @objc private func menuSetMode(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String else { return }
+        Task { await model.setMode(value) }
+    }
 
     private func updateIcon() {
         let symbol: String

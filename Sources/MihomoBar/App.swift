@@ -11,6 +11,10 @@ struct MihomoBarApp {
     static func main() {
         let args = CommandLine.arguments
         if HelperCLI.run(args) { return }
+        if args.contains("--dump-menu") {
+            MenuDump.run(args)
+            return
+        }
         if args.contains("--render-panes") {
             let index = args.firstIndex(of: "--render-panes")!
             let dir = index + 1 < args.count && !args[index + 1].hasPrefix("--")

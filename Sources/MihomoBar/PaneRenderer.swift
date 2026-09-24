@@ -25,7 +25,6 @@ enum PaneRenderer {
             ("3-subscription", AnyView(SubscriptionPane(model: model))),
             ("4-logs",         AnyView(LogsPane(model: model))),
             ("5-settings",     AnyView(SettingsPane(model: model))),
-            ("6-quickpanel",   AnyView(QuickPanel(model: model, onOpenWindow: {}))),
         ]
 
         print("离屏渲染检查（内核未运行状态 —— 最容易踩空数据崩溃的场景）")
@@ -33,12 +32,7 @@ enum PaneRenderer {
         var failures = 0
 
         for (name, view) in panes {
-            let frame: NSRect
-            if name == "6-quickpanel" {
-                frame = NSRect(origin: .zero, size: NSSize(width: 340, height: 460))
-            } else {
-                frame = NSRect(origin: .zero, size: size)
-            }
+            let frame = NSRect(origin: .zero, size: size)
 
             let hosting = NSHostingView(rootView: view)
             hosting.frame = frame

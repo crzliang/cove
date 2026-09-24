@@ -416,6 +416,15 @@ final class AppModel: ObservableObject {
 
     var logTail: String { kernel.tailLog(lines: 120) }
 
+    /// 仅供 --dump-menu / --selftest 这类 headless 场景使用：
+    /// 直接绕过轮询，把内核状态同步到界面状态。
+    func syncStatusFromKernel() {
+        status = kernel.status
+        if kernel.status.isRunning, let endpoint = kernel.endpoint {
+            traffic.start(base: endpoint, secret: kernel.secret)
+        }
+    }
+
     func refreshLog() {
         objectWillChange.send()
     }
