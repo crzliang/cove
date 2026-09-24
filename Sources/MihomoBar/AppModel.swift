@@ -14,7 +14,7 @@ final class AppModel: ObservableObject {
     /// 主窗口侧边栏的导航项。
     /// 因为不能用 `@State`（CLT 下 SwiftUI 宏插件缺失），选择状态放在这里。
     enum SidebarItem: String, CaseIterable, Identifiable {
-        case overview, proxies, connections, subscription, logs, settings
+        case overview, proxies, connections, rules, subscription, logs, settings
         var id: String { rawValue }
 
         var title: String {
@@ -22,6 +22,7 @@ final class AppModel: ObservableObject {
             case .overview:     return "概览"
             case .proxies:      return "节点"
             case .connections:  return "连接"
+            case .rules:        return "规则"
             case .subscription: return "订阅"
             case .logs:         return "日志"
             case .settings:     return "设置"
@@ -31,8 +32,9 @@ final class AppModel: ObservableObject {
         var symbol: String {
             switch self {
             case .overview:     return "gauge.medium"
-            case .proxies:      return "point.3.connected.trianglepath.dotted"
-            case .connections:  return "arrow.left.arrow.right.circle"
+            case .proxies:      return "globe"
+            case .connections:  return "arrow.left.arrow.right"
+            case .rules:        return "list.bullet.rectangle"
             case .subscription: return "arrow.triangle.2.circlepath"
             case .logs:         return "text.alignleft"
             case .settings:     return "gearshape"
@@ -64,6 +66,8 @@ final class AppModel: ObservableObject {
 
     // MARK: - 界面状态（同样因为不能用 @State）
     @Published var sidebarSelection: SidebarItem = .overview
+    /// 侧边栏是否展开；由工具栏按钮切换，不依赖分栏拖拽。
+    @Published var sidebarExpanded: Bool = true
     @Published var nodeSearch: String = ""
     @Published var selectedGroupID: String?
     /// 单节点延迟测试结果。比 /proxies 里带的 history 更新，用来做即时反馈。
@@ -74,6 +78,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var connections: [CtlClient.Connection] = []
     @Published private(set) var connectionTotals: (up: Int, down: Int) = (0, 0)
     @Published private(set) var connectionMemory: Int = 0
+    /// 经代理探测到的出口公网 IP；未探测或失败时为 nil。
+    @Published private(set) var exitIP: String?
+    @Published private(set) var exitIPRefreshing = false
+    private var lastExitIPFetch: Date = .distantPast
     /// 单条连接的实时速率（字节/秒）。
     ///
     /// mihomo 的 /connections 只给**累计**字节，没有速率字段，
@@ -84,15 +92,56 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var connectionRates: [String: Rate] = [:]
-    @Published var connectionSearch: String = ""
+    @Published var connectionSearch: String = "" {
+        didSet { recomputeVisibleConnections() }
+    }
     /// 连接列表默认按「最近有流量」排序，方便看正在传输的
-    @Published var connectionSortByTraffic = true
+    @Published var connectionSortByTraffic = true {
+        didSet {
+            if connectionSortByTraffic { connectionSortColumn = .traffic }
+            recomputeVisibleConnections()
+        }
+    }
+    /// 连接表头排序列
+    enum ConnectionSortColumn: String {
+        case host, rule, chains, traffic, duration
+    }
+    @Published var connectionSortColumn: ConnectionSortColumn = .traffic {
+        didSet { recomputeVisibleConnections() }
+    }
+    @Published var connectionSortAscending = false {
+        didSet { recomputeVisibleConnections() }
+    }
+    /// 筛选/排序后的可见列表（缓存，避免 SwiftUI 每次 body 重算）。
+    @Published private(set) var visibleConnections: [CtlClient.Connection] = []
+    /// 连接页选中行，右侧展示详情；nil 表示未选中。
+    @Published var selectedConnectionID: String?
 
     /// 上一次采样，用于算速率
     private var previousSamples: [String: (up: Int, down: Int, at: Date)] = [:]
 
+    // MARK: - 规则
+    @Published private(set) var rules: [CtlClient.Rule] = []
+    @Published var ruleSearch: String = ""
+    @Published private(set) var visibleRules: [CtlClient.Rule] = []
+    /// 规则页「添加」表单（不能用 @State）
+    @Published var showingAddRuleSheet = false
+    @Published var draftRuleType: String = "DOMAIN-SUFFIX"
+    @Published var draftRulePayload: String = ""
+    @Published var draftRuleProxy: String = "DIRECT"
+    @Published var draftRuleNoResolve: Bool = false
+
+    /// 节点页展开的策略组（卡片网格）
+    @Published var expandedProxyGroups: Set<String> = []
+
     @Published var settings: Settings
     @Published var banner: Banner?
+
+    /// 订阅页「添加」表单草稿（不能用 @State，见类型注释）
+    @Published var draftSubName: String = ""
+    @Published var draftSubURL: String = ""
+    /// 正在单独更新的订阅 id
+    @Published private(set) var updatingSubscriptionID: String?
 
     /// 设置改过了但内核还在用旧的 —— 提示用户重启
     @Published var needsRestart: Bool = false
@@ -150,10 +199,13 @@ final class AppModel: ObservableObject {
         if kernel.status.isRunning {
             busy = true
             if systemProxyOn { await setSystemProxy(false) }
+            traffic.stop()
             kernel.stop()
             status = kernel.status
             groups = []
             providerInfo = nil
+            exitIP = nil
+            connectionMemory = 0
             needsRestart = false
             busy = false
             return
@@ -177,7 +229,21 @@ final class AppModel: ObservableObject {
         defer { busy = false }
         do {
             let binary = try Bundled.ensureKernel()
-            let ui = try Bundled.ensureUI()
+
+            // 有订阅但还没落盘时先拉一份，否则 type: file 的 provider 是空的
+            if settings.customConfigPath.trimmingCharacters(in: .whitespaces).isEmpty {
+                for sub in settings.activeSubscriptions {
+                    let path = Paths.subscriptionFile(id: sub.id)
+                    if !FileManager.default.fileExists(atPath: path.path) {
+                        let count = try await SubscriptionFetcher.downloadAndStore(sub)
+                        if let idx = settings.subscriptions.firstIndex(where: { $0.id == sub.id }) {
+                            settings.subscriptions[idx].lastNodeCount = count
+                        }
+                    }
+                }
+                try? settings.save()
+            }
+
             let config = try ConfigWriter.resolvedConfig(for: settings)
 
             // 提权模式下配置文件由用户可写，而内核以 root 读它。
@@ -187,10 +253,12 @@ final class AppModel: ObservableObject {
                 return
             }
 
+            // 不再挂 -ext-ui：本应用是原生界面，不需要 MetaCubeXD 网页面板，
+            // 否则内核每次启动都会检查/下载 UI 并打日志。
             await kernel.start(config: config,
                                binary: binary,
                                dataDir: Paths.dataDir,
-                               uiDir: ui,
+                               uiDir: nil,
                                privileged: privileged)
             status = kernel.status
             if case .failed(let msg) = kernel.status {
@@ -198,6 +266,7 @@ final class AppModel: ObservableObject {
             } else {
                 needsRestart = false
                 await refreshRuntime()
+                await refreshExitIP(force: true)
             }
         } catch {
             let msg = String(describing: error)
@@ -217,6 +286,78 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: - 系统代理
+
+    /// 开关 TUN：落盘 → 重写配置 → 按特权模式重启内核。
+    ///
+    /// 只改 `settings.tunEnabled` 不够——必须用助手以 root 拉起内核，
+    /// TUN 接口才会真正建起来。
+    func setTunEnabled(_ on: Bool) async {
+        if on {
+            helperInstalled = HelperInstaller.isInstalled
+            helperRunning = HelperInstaller.isRunning
+            guard helperInstalled else {
+                banner = Banner(text: "TUN 需要特权助手。请到设置里先安装。", isError: true)
+                sidebarSelection = .settings
+                return
+            }
+            guard helperRunning else {
+                banner = Banner(text: "特权助手未运行，请到设置重新安装助手。", isError: true)
+                sidebarSelection = .settings
+                return
+            }
+        }
+
+        guard settings.tunEnabled != on else { return }
+
+        var s = settings
+        s.tunEnabled = on
+        settings = s
+        busy = true
+        defer { busy = false }
+
+        do {
+            try s.save()
+            if s.customConfigPath.trimmingCharacters(in: .whitespaces).isEmpty {
+                _ = try ConfigWriter.resolvedConfig(for: s)
+            }
+
+            let wasRunning = kernel.status.isRunning
+            if wasRunning {
+                // 切换运行身份必须停掉旧进程再拉起
+                if systemProxyOn {
+                    try? SystemProxy.set(enabled: false, port: settings.mixedPort)
+                    systemProxyOn = false
+                }
+                traffic.stop()
+                kernel.stop()
+                status = kernel.status
+                // 给 utun / 端口一点释放时间
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+
+            if wasRunning || on {
+                await startKernel()
+            }
+
+            if case .failed(let msg) = status {
+                banner = Banner(text: "TUN 切换失败：\(msg)", isError: true)
+                return
+            }
+
+            needsRestart = false
+            if on {
+                let ok = kernel.isPrivileged && status.isRunning
+                banner = Banner(
+                    text: ok ? "TUN 已开启，内核以 root 运行" : "设置已保存，但内核未以特权模式运行",
+                    isError: !ok)
+            } else {
+                banner = Banner(text: "TUN 已关闭", isError: false)
+            }
+            await refreshRuntime()
+        } catch {
+            banner = Banner(text: "切换 TUN 失败：\(error)", isError: true)
+        }
+    }
 
     func setSystemProxy(_ on: Bool) async {
         busy = true
@@ -239,6 +380,7 @@ final class AppModel: ObservableObject {
         do {
             try await ctl.setMode(newMode)
             mode = newMode
+            await refreshExitIP(force: true)
         } catch {
             banner = Banner(text: String(describing: error), isError: true)
         }
@@ -249,6 +391,7 @@ final class AppModel: ObservableObject {
         do {
             try await ctl.select(group: group, node: node)
             try await refreshProxies(using: ctl)
+            await refreshExitIP(force: true)
         } catch {
             banner = Banner(text: String(describing: error), isError: true)
         }
@@ -262,10 +405,8 @@ final class AppModel: ObservableObject {
         busy = true
         defer { busy = false }
         do {
-            if settings.customConfigPath.isEmpty {
-                // 设置可能改过（端口、订阅），先重新生成
-                _ = try ConfigWriter.resolvedConfig(for: settings)
-            }
+            // 先写回磁盘，再让内核用空 path 重读启动时的 `-f` 文件
+            _ = try ConfigWriter.resolvedConfig(for: settings)
             try await ctl.reloadConfig()
             banner = Banner(text: "已重载配置", isError: false)
             needsRestart = false
@@ -275,27 +416,116 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 立即拉取订阅。平时用不到 —— 内核配了 `interval` 会自己定时刷新。
-    func refreshSubscription() async {
-        guard let ctl else {
-            banner = Banner(text: "内核未运行", isError: true)
+    /// 立即拉取订阅：系统网络下载 → 落盘 → 重载/刷新 provider。
+    ///
+    /// - Parameter id: 指定某一条；`nil` 表示更新全部启用中的订阅。
+    func refreshSubscription(id: String? = nil) async {
+        if !settings.customConfigPath.trimmingCharacters(in: .whitespaces).isEmpty {
+            banner = Banner(text: "正在使用自定义配置，请在该文件里管理订阅", isError: true)
             return
         }
-        guard !settings.subscriptionURL.isEmpty else {
-            banner = Banner(text: "还没有填写订阅链接", isError: true)
-            return
+        let targets: [SubscriptionEntry]
+        if let id {
+            guard let one = settings.subscriptions.first(where: { $0.id == id }), one.isUsable else {
+                banner = Banner(text: "找不到这条订阅", isError: true)
+                return
+            }
+            targets = [one]
+        } else {
+            targets = settings.activeSubscriptions
+            guard !targets.isEmpty else {
+                banner = Banner(text: "还没有可用的订阅", isError: true)
+                return
+            }
         }
+
         busy = true
         defer { busy = false }
         do {
-            try await ctl.updateProvider(ConfigWriter.providerName)
-            // provider 更新后策略组列表会变，等一小会再刷新
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            await refreshRuntime()
-            banner = Banner(text: "订阅已更新：\(providerInfo ?? "完成")", isError: false)
+            var total = 0
+            var errors: [String] = []
+            var succeeded: [SubscriptionEntry] = []
+            for sub in targets {
+                do {
+                    let count = try await SubscriptionFetcher.downloadAndStore(sub)
+                    total += count
+                    if let idx = settings.subscriptions.firstIndex(where: { $0.id == sub.id }) {
+                        settings.subscriptions[idx].lastNodeCount = count
+                        succeeded.append(settings.subscriptions[idx])
+                    }
+                } catch {
+                    errors.append("\(sub.name)：\(error)")
+                }
+            }
+            try settings.save()
+            _ = try ConfigWriter.resolvedConfig(for: settings)
+
+            let kernelRunning = ctl != nil
+            if let ctl {
+                let providers = (try? await ctl.providers()) ?? [:]
+                let missing = settings.activeSubscriptions.contains { providers[$0.providerName] == nil }
+                if missing {
+                    try await ctl.reloadConfig()
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+                for sub in succeeded {
+                    try? await ctl.updateProvider(sub.providerName)
+                }
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                needsRestart = false
+                await refreshRuntime()
+            }
+
+            if errors.isEmpty {
+                let msg = kernelRunning
+                    ? "订阅已更新：共 \(total) 个节点"
+                    : "订阅已下载（\(total) 个节点）。启动内核后生效。"
+                banner = Banner(text: msg, isError: false)
+            } else if total > 0 {
+                banner = Banner(text: "部分成功（\(total) 节点）。失败：\(errors.joined(separator: "；"))",
+                                isError: true)
+            } else {
+                banner = Banner(text: "订阅更新失败：\(errors.joined(separator: "；"))", isError: true)
+            }
         } catch {
             banner = Banner(text: "订阅更新失败：\(String(describing: error))", isError: true)
         }
+    }
+
+    /// 添加一条订阅并立刻拉取。
+    func addSubscription(name: String, url: String) async {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let u = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !u.isEmpty else {
+            banner = Banner(text: "请填写订阅链接", isError: true)
+            return
+        }
+        let entry = SubscriptionEntry.make(name: n.isEmpty ? "订阅 \(settings.subscriptions.count + 1)" : n,
+                                           url: u)
+        settings.subscriptions.append(entry)
+        draftSubName = ""
+        draftSubURL = ""
+        saveSettings(settings)
+        await refreshSubscription(id: entry.id)
+    }
+
+    func removeSubscription(id: String) {
+        settings.subscriptions.removeAll { $0.id == id }
+        try? FileManager.default.removeItem(at: Paths.subscriptionFile(id: id))
+        saveSettings(settings)
+    }
+
+    func setSubscriptionEnabled(id: String, enabled: Bool) {
+        guard let idx = settings.subscriptions.firstIndex(where: { $0.id == id }) else { return }
+        guard settings.subscriptions[idx].enabled != enabled else { return }
+        settings.subscriptions[idx].enabled = enabled
+        saveSettings(settings)
+    }
+
+    func refreshSubscriptionRow(id: String) async {
+        updatingSubscriptionID = id
+        defer { updatingSubscriptionID = nil }
+        await refreshSubscription(id: id)
     }
 
     /// 测一组节点的延迟。交给内核并发跑，比在客户端逐个发请求快得多。
@@ -349,8 +579,21 @@ final class AppModel: ObservableObject {
             let list = snap.connections ?? []
             connections = list
             connectionTotals = (snap.uploadTotal, snap.downloadTotal)
-            connectionMemory = snap.memory ?? 0
+            // API 有时恒为 0（本机构建实测 /connections.memory 与 /memory inuse 皆 0），
+            // 回退到内核进程 RSS，与活动监视器一致。
+            if let api = snap.memory, api > 0 {
+                connectionMemory = api
+            } else if let pid = kernel.runningPID,
+                      let rss = Privileged.residentBytes(of: pid) {
+                connectionMemory = rss
+            } else {
+                connectionMemory = 0
+            }
             updateRates(list)
+            recomputeVisibleConnections()
+            if let id = selectedConnectionID, !list.contains(where: { $0.id == id }) {
+                selectedConnectionID = nil
+            }
         } catch {
             // 内核刚重启时接口可能还没就绪，静默跳过
         }
@@ -391,6 +634,8 @@ final class AppModel: ObservableObject {
         do {
             try await ctl.closeConnection(id)
             connections.removeAll { $0.id == id }
+            if selectedConnectionID == id { selectedConnectionID = nil }
+            recomputeVisibleConnections()
         } catch {
             banner = Banner(text: "断开连接失败：\(String(describing: error))", isError: true)
         }
@@ -403,6 +648,8 @@ final class AppModel: ObservableObject {
             connections = []
             connectionRates = [:]
             previousSamples = [:]
+            visibleConnections = []
+            selectedConnectionID = nil
             banner = Banner(text: "已断开全部连接", isError: false)
         } catch {
             banner = Banner(text: "断开失败：\(String(describing: error))", isError: true)
@@ -413,7 +660,7 @@ final class AppModel: ObservableObject {
     ///
     /// 搜索的字段拼装刻意写成显式语句而不是 `[a,b,c].compactMap{...}` ——
     /// 后者会让类型检查器直接超时（Swift 对长链式 Optional 表达式很敏感）。
-    var visibleConnections: [CtlClient.Connection] {
+    private func recomputeVisibleConnections() {
         let keyword = connectionSearch.trimmingCharacters(in: .whitespaces).lowercased()
         var list = connections
 
@@ -435,19 +682,176 @@ final class AppModel: ObservableObject {
             }
         }
 
-        guard connectionSortByTraffic else { return list }
-        return list.sorted { a, b in
-            (a.upload + a.download) > (b.upload + b.download)
+        let ascending = connectionSortAscending
+        list.sort { a, b in
+            let result: Bool
+            switch connectionSortColumn {
+            case .host:
+                result = connectionHost(a).localizedCaseInsensitiveCompare(connectionHost(b)) == .orderedAscending
+            case .rule:
+                let ra = "\(a.rule ?? ""),\(a.rulePayload ?? "")"
+                let rb = "\(b.rule ?? ""),\(b.rulePayload ?? "")"
+                result = ra.localizedCaseInsensitiveCompare(rb) == .orderedAscending
+            case .chains:
+                let ca = (a.chains ?? []).reversed().joined(separator: " → ")
+                let cb = (b.chains ?? []).reversed().joined(separator: " → ")
+                result = ca.localizedCaseInsensitiveCompare(cb) == .orderedAscending
+            case .traffic:
+                result = (a.upload + a.download) < (b.upload + b.download)
+            case .duration:
+                let da = a.startDate ?? .distantPast
+                let db = b.startDate ?? .distantPast
+                result = da < db
+            }
+            return ascending ? result : !result
+        }
+        visibleConnections = list
+    }
+
+    private func connectionHost(_ conn: CtlClient.Connection) -> String {
+        let m = conn.metadata
+        if let host = m?.host, !host.isEmpty { return host }
+        if let sniff = m?.sniffHost, !sniff.isEmpty { return sniff }
+        if let ip = m?.destinationIP, !ip.isEmpty { return ip }
+        return conn.rulePayload ?? ""
+    }
+
+    func toggleConnectionSort(_ column: ConnectionSortColumn) {
+        if connectionSortColumn == column {
+            connectionSortAscending.toggle()
+        } else {
+            connectionSortColumn = column
+            connectionSortAscending = (column == .host || column == .rule || column == .chains)
+        }
+        connectionSortByTraffic = (column == .traffic && !connectionSortAscending)
+    }
+
+    // MARK: - 规则
+
+    func refreshRules() async {
+        guard let ctl else { rules = []; visibleRules = []; return }
+        do {
+            rules = try await ctl.rules()
+            recomputeVisibleRules()
+        } catch {
+            // 静默
         }
     }
 
-    func openDashboard() {
-        guard kernel.endpoint != nil else {
-            banner = Banner(text: "内核未运行", isError: true)
+    private func recomputeVisibleRules() {
+        let keyword = ruleSearch.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !keyword.isEmpty else {
+            visibleRules = rules
             return
         }
-        guard let url = URL(string: "http://127.0.0.1:\(kernel.port)/ui/") else { return }
-        NSWorkspace.shared.open(url)
+        visibleRules = rules.filter { rule in
+            [rule.type, rule.payload ?? "", rule.proxy ?? ""]
+                .joined(separator: " ")
+                .lowercased()
+                .contains(keyword)
+        }
+    }
+
+    func updateRuleSearch(_ text: String) {
+        ruleSearch = text
+        recomputeVisibleRules()
+    }
+
+    /// 可选出站：内置 + 当前策略组。
+    var ruleProxyOptions: [String] {
+        var opts = ["DIRECT", "REJECT", "🚀 节点选择", "♻️ 自动选择", "PROXY"]
+        for g in groups where !opts.contains(g.name) {
+            opts.append(g.name)
+        }
+        return opts
+    }
+
+    var canEditCustomRules: Bool {
+        settings.customConfigPath.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    func addCustomRule(_ rule: CustomRule) async {
+        guard canEditCustomRules else {
+            banner = Banner(text: "正在使用自定义配置，请直接编辑该 YAML 的 rules", isError: true)
+            return
+        }
+        guard rule.clashLine != nil else {
+            banner = Banner(text: "规则不完整：请填写类型、内容和出站", isError: true)
+            return
+        }
+        var s = settings
+        s.customRules.insert(rule, at: 0)
+        await persistCustomRules(s, message: "已添加规则")
+        resetRuleDraft()
+        showingAddRuleSheet = false
+    }
+
+    func beginAddCustomRule() {
+        resetRuleDraft()
+        if !ruleProxyOptions.contains(draftRuleProxy) {
+            draftRuleProxy = ruleProxyOptions.first ?? "DIRECT"
+        }
+        showingAddRuleSheet = true
+    }
+
+    func resetRuleDraft() {
+        draftRuleType = "DOMAIN-SUFFIX"
+        draftRulePayload = ""
+        draftRuleProxy = "DIRECT"
+        draftRuleNoResolve = false
+    }
+
+    func submitDraftCustomRule() async {
+        let rule = CustomRule.make(type: draftRuleType,
+                                   payload: draftRulePayload,
+                                   proxy: draftRuleProxy,
+                                   noResolve: draftRuleNoResolve)
+        await addCustomRule(rule)
+    }
+
+    func deleteCustomRule(id: String) async {
+        guard canEditCustomRules else { return }
+        var s = settings
+        s.customRules.removeAll { $0.id == id }
+        await persistCustomRules(s, message: "已删除规则")
+    }
+
+    func toggleCustomRule(id: String) async {
+        guard canEditCustomRules else { return }
+        var s = settings
+        guard let idx = s.customRules.firstIndex(where: { $0.id == id }) else { return }
+        s.customRules[idx].enabled.toggle()
+        await persistCustomRules(s, message: s.customRules[idx].enabled ? "已启用规则" : "已禁用规则")
+    }
+
+    private func persistCustomRules(_ s: Settings, message: String) async {
+        settings = s
+        do {
+            try s.save()
+            _ = try ConfigWriter.resolvedConfig(for: s)
+            if status.isRunning {
+                if let ctl {
+                    try await ctl.reloadConfig()
+                    await refreshRules()
+                    banner = Banner(text: "\(message)，已重载内核", isError: false)
+                } else {
+                    needsRestart = true
+                    banner = Banner(text: "\(message)。请重启内核生效", isError: false)
+                }
+            } else {
+                banner = Banner(text: message, isError: false)
+            }
+        } catch {
+            banner = Banner(text: "保存规则失败：\(error)", isError: true)
+        }
+    }
+
+    func toggleProxyGroupExpanded(_ id: String) {
+        if expandedProxyGroups.contains(id) {
+            expandedProxyGroups.remove(id)
+        } else {
+            expandedProxyGroups.insert(id)
+        }
     }
 
     // MARK: - 登录项
@@ -514,7 +918,8 @@ final class AppModel: ObservableObject {
     func saveSettings(_ s: Settings) {
         let runtimeKeysChanged =
             s.mixedPort != settings.mixedPort ||
-            s.subscriptionURL != settings.subscriptionURL ||
+            s.subscriptions != settings.subscriptions ||
+            s.customRules != settings.customRules ||
             s.customConfigPath != settings.customConfigPath ||
             s.tunEnabled != settings.tunEnabled ||
             s.logLevel != settings.logLevel
@@ -522,6 +927,11 @@ final class AppModel: ObservableObject {
         settings = s
         do {
             try s.save()
+            // 订阅等改动立刻写回 generated.yaml，避免「设置已保存但磁盘配置还是旧的」
+            // 导致「立即更新」去刷一个不存在的 provider → 404。
+            if runtimeKeysChanged, s.customConfigPath.trimmingCharacters(in: .whitespaces).isEmpty {
+                _ = try ConfigWriter.resolvedConfig(for: s)
+            }
             if kernel.status.isRunning && runtimeKeysChanged {
                 needsRestart = true
                 banner = Banner(text: "设置已保存。这些改动需要重启内核才生效。", isError: false)
@@ -584,31 +994,99 @@ final class AppModel: ObservableObject {
         helperInstalled = HelperInstaller.isInstalled
         helperRunning = HelperInstaller.isRunning
 
-        // 内核起来就接上流量流，停了就断开
+        // 内核起来就接上流量流；停了或换端口/密钥时必须重连（见 TrafficMonitor.start）。
         if let endpoint = kernel.endpoint {
             traffic.start(base: endpoint, secret: kernel.secret)
-        } else if traffic.active {
+        } else {
             traffic.stop()
         }
 
         guard let ctl else {
             groups = []
             providerInfo = nil
+            exitIP = nil
             return
         }
         do {
+            // 连接 / 规则只在对应页可见时拉，避免无谓的大 JSON。
+            if sidebarSelection == .connections {
+                let cfg = try await ctl.configs()
+                if let m = cfg.mode { mode = m }
+                await refreshConnections(using: ctl)
+                return
+            }
+            if sidebarSelection == .rules {
+                let cfg = try await ctl.configs()
+                if let m = cfg.mode { mode = m }
+                do { rules = try await ctl.rules(); recomputeVisibleRules() } catch {}
+                return
+            }
+
             let cfg = try await ctl.configs()
             if let m = cfg.mode { mode = m }
             try await refreshProxies(using: ctl)
             await refreshProviderInfo(using: ctl)
-
-            // 连接列表只在「连接」页可见时拉 —— 连接多的时候这个接口不便宜，
-            // 没必要在用户看别的页面时一直轮询。
-            if sidebarSelection == .connections {
+            if sidebarSelection == .overview {
                 await refreshConnections(using: ctl)
+                await refreshExitIPIfNeeded()
             }
         } catch {
             // 内核刚起来时 API 可能还没就绪，静默忽略，下个周期重试
+        }
+    }
+
+    /// 经 mixed-port 访问公网 IP 接口，得到当前出口地址。
+    func refreshExitIP(force: Bool = true) async {
+        await refreshExitIPIfNeeded(force: force)
+    }
+
+    private func refreshExitIPIfNeeded(force: Bool = false) async {
+        guard status.isRunning else {
+            exitIP = nil
+            exitIPRefreshing = false
+            return
+        }
+        if !force, Date().timeIntervalSince(lastExitIPFetch) < 45 { return }
+        if exitIPRefreshing { return }
+        exitIPRefreshing = true
+        defer { exitIPRefreshing = false }
+        lastExitIPFetch = Date()
+
+        let port = settings.mixedPort
+        let endpoints = [
+            "https://api.ipify.org",
+            "https://ifconfig.me/ip",
+            "https://api.ip.sb/ip",
+        ]
+        for urlString in endpoints {
+            guard let url = URL(string: urlString) else { continue }
+            var request = URLRequest(url: url, timeoutInterval: 6)
+            request.setValue("MihomoBar", forHTTPHeaderField: "User-Agent")
+
+            let config = URLSessionConfiguration.ephemeral
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable: true,
+                kCFNetworkProxiesHTTPProxy: "127.0.0.1",
+                kCFNetworkProxiesHTTPPort: port,
+                kCFNetworkProxiesHTTPSEnable: true,
+                kCFNetworkProxiesHTTPSProxy: "127.0.0.1",
+                kCFNetworkProxiesHTTPSPort: port,
+            ]
+            let session = URLSession(configuration: config)
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse,
+                      (200..<300).contains(http.statusCode),
+                      let text = String(data: data, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                      !text.isEmpty,
+                      text.count <= 45,
+                      !text.contains("<") else { continue }
+                exitIP = text
+                return
+            } catch {
+                continue
+            }
         }
     }
 
@@ -632,20 +1110,33 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshProviderInfo(using ctl: CtlClient) async {
-        guard !settings.subscriptionURL.isEmpty, settings.customConfigPath.isEmpty else {
+        let active = settings.activeSubscriptions
+        guard !active.isEmpty, settings.customConfigPath.isEmpty else {
             providerInfo = nil
             return
         }
-        guard let providers = try? await ctl.providers(),
-              let sub = providers[ConfigWriter.providerName] else {
+        guard let providers = try? await ctl.providers() else {
             providerInfo = "订阅尚未加载"
             return
         }
-        var text = "\(sub.nodeCount) 个节点"
-        if let updated = sub.updatedAt {
-            text += " · 更新于 \(Self.shortTime(updated))"
+        var total = 0
+        var loaded = 0
+        for sub in active {
+            if let entry = providers[sub.providerName] {
+                total += entry.nodeCount
+                loaded += 1
+                if let idx = settings.subscriptions.firstIndex(where: { $0.id == sub.id }) {
+                    settings.subscriptions[idx].lastNodeCount = entry.nodeCount
+                }
+            }
         }
-        providerInfo = text
+        if loaded == 0 {
+            providerInfo = "订阅尚未加载"
+        } else if active.count == 1 {
+            providerInfo = "\(total) 个节点"
+        } else {
+            providerInfo = "\(active.count) 个订阅 · 共 \(total) 个节点"
+        }
     }
 
     private static func shortTime(_ iso: String) -> String {

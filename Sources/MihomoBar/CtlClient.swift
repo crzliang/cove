@@ -2,9 +2,7 @@ import Foundation
 
 /// mihomo RESTful API 客户端。
 ///
-/// 这里只做「托盘里需要立刻看到/操作」的少数几个接口 ——
-/// 完整的仪表盘（节点列表、规则、连接、流量曲线）由内核自带的
-/// MetaCubeXD 在浏览器里提供，不必重复实现。
+/// 托盘与主窗口需要的接口：版本、配置、代理组、延迟、连接、重载等。
 struct CtlClient {
 
     let base: URL
@@ -73,6 +71,21 @@ struct CtlClient {
         let providers: [String: ProviderEntry]
     }
 
+    // MARK: - 规则（/rules）
+
+    struct RulesResponse: Decodable {
+        let rules: [Rule]
+    }
+
+    struct Rule: Decodable, Identifiable, Hashable {
+        let type: String
+        let payload: String?
+        let proxy: String?
+        let size: Int?
+
+        var id: String { "\(type)|\(payload ?? "")|\(proxy ?? "")|\(size ?? 0)" }
+    }
+
     // MARK: - 连接（/connections）
 
     struct Snapshot: Decodable {
@@ -90,10 +103,29 @@ struct CtlClient {
         let upload: Int
         let download: Int
         let start: String
+        /// 解码时解析好，避免列表每次渲染都 new `ISO8601DateFormatter`（很贵）。
+        let startDate: Date?
         let chains: [String]?
         let rule: String?
         let rulePayload: String?
         let metadata: Metadata?
+
+        enum CodingKeys: String, CodingKey {
+            case id, upload, download, start, chains, rule, rulePayload, metadata
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            upload = try c.decode(Int.self, forKey: .upload)
+            download = try c.decode(Int.self, forKey: .download)
+            start = try c.decode(String.self, forKey: .start)
+            startDate = Self.parseStart(start)
+            chains = try c.decodeIfPresent([String].self, forKey: .chains)
+            rule = try c.decodeIfPresent(String.self, forKey: .rule)
+            rulePayload = try c.decodeIfPresent(String.self, forKey: .rulePayload)
+            metadata = try c.decodeIfPresent(Metadata.self, forKey: .metadata)
+        }
 
         struct Metadata: Decodable {
             /// "tcp" / "udp"
@@ -123,12 +155,28 @@ struct CtlClient {
         /// Go 会带 9 位纳秒（`2026-09-24T13:40:00.123456789+08:00`），
         /// 而 `ISO8601DateFormatter` 默认只认 3 位小数，所以要先试带小数位的配置，
         /// 再退回不带小数位的形式。
+        ///
+        /// Formatter 本身创建很贵，必须静态复用。
         static func parseStart(_ raw: String) -> Date? {
-            let withFraction = ISO8601DateFormatter()
-            withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let d = withFraction.date(from: raw) { return d }
-            return ISO8601DateFormatter().date(from: raw)
+            formatterLock.lock()
+            defer { formatterLock.unlock() }
+            if let d = fractionFormatter.date(from: raw) { return d }
+            return basicFormatter.date(from: raw)
         }
+
+        private static let formatterLock = NSLock()
+
+        private static let fractionFormatter: ISO8601DateFormatter = {
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return f
+        }()
+
+        private static let basicFormatter: ISO8601DateFormatter = {
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime]
+            return f
+        }()
 
         /// 接受字符串或数字两种端口编码
         struct Port: Decodable {
@@ -165,7 +213,11 @@ struct CtlClient {
         guard (200..<300).contains(http.statusCode) else {
             throw CtlError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
         }
-        return try JSONDecoder().decode(T.self, from: data)
+        // 解码放到后台：/proxies、/connections 的 JSON 经常上百 KB，
+        // 在 MainActor 上 decode 会让切页瞬间卡一下。
+        return try await Task.detached(priority: .userInitiated) {
+            try JSONDecoder().decode(T.self, from: data)
+        }.value
     }
 
     private func perform(_ path: String, method: String, body: [String: Any]? = nil) async throws {
@@ -220,6 +272,12 @@ struct CtlClient {
         return response.providers
     }
 
+    /// 当前生效规则（只读）
+    func rules() async throws -> [Rule] {
+        let response: RulesResponse = try await fetch("/rules")
+        return response.rules
+    }
+
     /// 命令内核立即重新拉取订阅。
     /// 平时不需要调 —— `proxy-providers` 配了 `interval` 后内核会自己刷新。
     func updateProvider(_ name: String) async throws {
@@ -244,9 +302,11 @@ struct CtlClient {
         try await perform("/connections", method: "DELETE")
     }
 
-    /// 让内核重新读取磁盘上的配置（订阅更新后调用）
+    /// 让内核重新读取启动时那份配置文件（空 path = 重读 `-f`，不受 SAFE_PATHS 限制）。
+    /// 显式传 generated.yaml 会被拒：允许路径只有 `-d` 数据目录。
     func reloadConfig() async throws {
-        try await perform("/configs?force=true", method: "PUT", body: ["path": "", "payload": ""])
+        try await perform("/configs?force=true", method: "PUT",
+                          body: ["path": "", "payload": ""])
     }
 }
 

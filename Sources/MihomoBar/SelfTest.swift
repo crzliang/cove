@@ -48,7 +48,12 @@ enum SelfTest {
                 exit(1)
             }
             let ui = try? Bundled.ensureUI()
-            check("定位 MetaCubeXD", ui != nil, ui?.path ?? "未找到（面板将不可用）")
+            // MetaCubeXD 仅作可选资源；原生 UI 已接管，不强制
+            if let ui {
+                check("可选 MetaCubeXD 资源", true, ui.path)
+            } else {
+                check("可选 MetaCubeXD 资源", true, "未打包（正常，本应用用原生界面）")
+            }
 
             if let v = Bundled.kernelVersion(binary: kernel) {
                 check("内核版本", true, v)
@@ -87,7 +92,7 @@ enum SelfTest {
             let k = Kernel()
             print("  … 启动内核")
             await k.start(config: config, binary: kernel, dataDir: Paths.dataDir,
-                          uiDir: ui, privileged: false)
+                          uiDir: nil, privileged: false)
             guard k.status.isRunning else {
                 check("内核启动", false, "\(k.lastError ?? "未知")")
                 print("\n最近日志：\n\(k.tailLog(lines: 12))")
@@ -125,24 +130,15 @@ enum SelfTest {
                 // 订阅 provider 接口（没配订阅时也能调用，只是返回空字典）
                 let providers = try await ctl.providers()
                 check("GET /providers/proxies", true, "\(providers.count) 个 provider")
-                check("provider 名字常量一致", ConfigWriter.providerName == "sub",
-                      ConfigWriter.providerName)
+                let sample = SubscriptionEntry.make(name: "t", url: "https://example.com")
+                check("provider 命名规则", sample.providerName.hasPrefix("sub-"),
+                      sample.providerName)
             } catch {
                 check("控制器 API", false, "\(error)")
             }
 
-            // 7. 面板可访问
-            if ui != nil {
-                let probe = URL(string: "http://127.0.0.1:\(k.port)/ui/")!
-                var req = URLRequest(url: probe)
-                req.timeoutInterval = 5
-                if let (_, resp) = try? await URLSession.shared.data(for: req),
-                   (resp as? HTTPURLResponse)?.statusCode == 200 {
-                    check("MetaCubeXD 面板", true, probe.absoluteString)
-                } else {
-                    check("MetaCubeXD 面板", false, "未返回 200")
-                }
-            }
+            // 7. 原生界面，不再依赖 /ui/ 网页面板
+            check("跳过 MetaCubeXD 面板探测", true, "本应用使用原生 UI")
 
             // 8. 运行期信息文件
             let info = Paths.runtimeInfo
@@ -207,7 +203,7 @@ enum SelfTest {
                     await helperKernel.start(config: config,
                                              binary: kernel,
                                              dataDir: Paths.dataDir,
-                                             uiDir: ui,
+                                             uiDir: nil,
                                              privileged: true)
                     if helperKernel.status.isRunning {
                         check("助手以 root 启动内核", true, ":\(helperKernel.port)")
@@ -292,13 +288,26 @@ enum SelfTest {
             if let data = legacyJSON.data(using: .utf8),
                let decoded = try? JSONDecoder().decode(Settings.self, from: data) {
                 check("旧版 settings.json 可解码", true,
-                      "订阅保留=\(decoded.subscriptionURL.contains("example.com"))"
+                      "订阅数=\(decoded.subscriptions.count)"
                       + " 端口=\(decoded.mixedPort)"
                       + " 新字段默认=\(decoded.showInDock)")
-                check("旧配置的已有值未被覆盖",
-                      decoded.subscriptionURL == "https://example.com/sub" && decoded.mixedPort == 1234)
+                check("旧单链接迁入 subscriptions",
+                      decoded.subscriptions.count == 1
+                      && decoded.subscriptions[0].url == "https://example.com/sub"
+                      && decoded.subscriptions[0].id == "legacy"
+                      && decoded.mixedPort == 1234)
             } else {
                 check("旧版 settings.json 可解码", false, "解析失败，老用户设置会丢失")
+            }
+
+            let multiJSON = #"{"subscriptions":[{"id":"a1","name":"A","url":"https://a.example/sub","enabled":true}],"mixedPort":7890}"#
+            if let data = multiJSON.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode(Settings.self, from: data) {
+                check("多订阅 settings 可解码",
+                      decoded.subscriptions.count == 1
+                      && decoded.subscriptions[0].providerName == "sub-a1")
+            } else {
+                check("多订阅 settings 可解码", false)
             }
 
             // 9d. 内核版本字符串解析。
@@ -353,14 +362,14 @@ enum SelfTest {
                     check("解析出规则与链路", c.rule == "DomainSuffix"
                           && c.chains == ["香港01", "PROXY"])
                     check("纳秒级时间戳可解析",
-                          CtlClient.Connection.parseStart(c.start) != nil,
+                          c.startDate != nil,
                           c.start)
                 }
                 if list.count == 2 {
                     let c2 = list[1]
                     check("端口为数字时也能解析", c2.metadata?.sourcePort?.value == "53",
                           c2.metadata?.sourcePort?.value ?? "nil")
-                    check("秒级时间戳可解析", CtlClient.Connection.parseStart(c2.start) != nil)
+                    check("秒级时间戳可解析", c2.startDate != nil)
                 }
             } else {
                 check("连接快照解析", false, "解码失败")

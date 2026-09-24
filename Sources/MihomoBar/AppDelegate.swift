@@ -98,10 +98,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         model.startPolling()
         updateIcon()
 
-
         // 由用户设置决定是否自动开窗。开机自启时建议关掉，见 showWindowOnLaunch 注释。
         if model.settings.showWindowOnLaunch {
             showMainWindow()
+        }
+
+        // 默认启动内核；TUN 开着会走特权助手。
+        if model.settings.startKernelOnLaunch {
+            Task { await model.startKernel() }
         }
     }
 
@@ -344,10 +348,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         menu.addItem(modeSubmenu())
 
-        let dash = action("打开浏览器面板", #selector(menuOpenDashboard), symbol: "safari")
-        dash.isEnabled = model.status.isRunning
-        menu.addItem(dash)
-
         let reload = action("重载配置", #selector(menuReload), symbol: "arrow.clockwise")
         reload.isEnabled = model.status.isRunning && !model.busy
         menu.addItem(reload)
@@ -404,7 +404,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func menuToggleKernel()   { Task { await model.toggleKernel() } }
     @objc private func menuToggleProxy()    { Task { await model.setSystemProxy(!model.systemProxyOn) } }
-    @objc private func menuOpenDashboard()  { model.openDashboard() }
     @objc private func menuReload()         { Task { await model.reloadConfig() } }
     @objc private func menuShowWindow()     { showMainWindow() }
     @objc private func menuRevealData()     { model.revealDataDir() }

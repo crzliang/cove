@@ -23,6 +23,11 @@ enum Paths {
     /// 内核工作目录（放 cache.db / Country.mmdb / geosite.dat / providers/）
     static var dataDir: URL { root.appendingPathComponent("data", isDirectory: true) }
 
+    /// 某条订阅的落盘位置（相对内核 `-d` 即 `./providers/<id>.yaml`）
+    static func subscriptionFile(id: String) -> URL {
+        dataDir.appendingPathComponent("providers/\(id).yaml")
+    }
+
     /// MetaCubeXD 静态文件
     static var uiDir: URL { dataDir.appendingPathComponent("ui", isDirectory: true) }
 

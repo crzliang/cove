@@ -45,13 +45,13 @@ struct Card<Content: View>: View {
                     Spacer(minLength: 8)
                     if let accessory { accessory }
                 }
-                .padding(.horizontal, 14)
-                .padding(.top, 11)
-                .padding(.bottom, 9)
-                Divider().padding(.horizontal, 14)
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
+                Divider().padding(.horizontal, 12)
             }
             content
-                .padding(14)
+                .padding(12)
         }
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
         .overlay(
@@ -173,7 +173,7 @@ struct PaneScaffold<Content: View>: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.system(size: 20, weight: .semibold))
@@ -183,12 +183,11 @@ struct PaneScaffold<Content: View>: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .padding(.bottom, 2)
 
                 content
             }
-            .padding(20)
-            .frame(maxWidth: 760, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

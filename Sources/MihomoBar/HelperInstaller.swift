@@ -158,29 +158,40 @@ enum HelperInstaller {
     /// 但把「以 root 执行的可执行文件」放在用户可写的位置本身就是个隐患 ——
     /// 任何能写那个目录的进程都能替换掉内核，从而获得 root 执行。
     /// 所以提权模式下用一份放在 root 专属目录里的副本。
+    ///
+    /// 已装助手时**只**走 `stageKernel`（root、不弹框）。osascript 密码框
+    /// 不支持触控 ID，所以绝不再在「助手已装」时用它更新内核。
     static func stageKernelForHelper() throws -> String {
         guard let source = try? Bundled.ensureKernel() else {
             throw HelperInstallError.kernelMissing
         }
         let destination = "\(Helper.socketDirectory)/mihomo"
         let fm = FileManager.default
-        if let srcDate = (try? fm.attributesOfItem(atPath: source.path)[.modificationDate]) as? Date,
-           let dstDate = (try? fm.attributesOfItem(atPath: destination)[.modificationDate]) as? Date,
-           dstDate >= srcDate {
-            // 已经是最新的 —— 但仍然要确认隔离属性被清干净了，
-            // 否则会掉进「内核启动后秒退且无输出」的坑。
-            if needsQuarantineClear(destination) {
-                let q = Privileged.shellQuote
-                try Privileged.runBatch([
-                    "{ /usr/bin/xattr -d com.apple.quarantine \(q(destination)) 2>/dev/null || true; }",
-                ])
-            }
+        let upToDate: Bool = {
+            guard let src = (try? fm.attributesOfItem(atPath: source.path)[.modificationDate]) as? Date,
+                  let dst = (try? fm.attributesOfItem(atPath: destination)[.modificationDate]) as? Date
+            else { return false }
+            return dst >= src
+        }()
+
+        if upToDate && !needsQuarantineClear(destination) {
             return destination
         }
+
+        if isInstalled {
+            var req = Helper.Request(cmd: .stageKernel)
+            req.protocolVersion = Helper.protocolVersion
+            req.kernelSource = source.path
+            do {
+                _ = try HelperSocket.call(req)
+                return destination
+            } catch {
+                throw HelperInstallError.helperOutdated(String(describing: error))
+            }
+        }
+
+        // 未装助手时的降级（TUN 正常不会走到这里）
         let q = Privileged.shellQuote
-        // 去隔离属性是**必须**的：带 com.apple.quarantine 的二进制被 root 执行时
-        // 会被 Gatekeeper 直接 SIGKILL（rc=137）且零输出。
-        // 用 `{ ...; }` 包住是为了让 `|| true` 不影响外层 `&&` 链的短路语义。
         try Privileged.runBatch([
             "/bin/mkdir -p \(q(Helper.socketDirectory))",
             "/usr/bin/install -m 755 -o root -g wheel \(q(source.path)) \(q(destination))",
@@ -194,6 +205,7 @@ enum HelperInstallError: Error, CustomStringConvertible {
     case helperBinaryMissing
     case didNotStart(String?)
     case kernelMissing
+    case helperOutdated(String)
 
     var description: String {
         switch self {
@@ -204,6 +216,9 @@ enum HelperInstallError: Error, CustomStringConvertible {
                  + "请检查 /var/log/\(Helper.label).helper.log 与 .stderr.log"
         case .kernelMissing:
             return "找不到 mihomo 内核"
+        case .helperOutdated(let detail):
+            return "特权助手版本过旧，无法免密更新内核（\(detail)）。\n"
+                 + "请到设置里点「重新安装」助手（只需再授权一次）。"
         }
     }
 }

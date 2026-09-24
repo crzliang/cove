@@ -82,11 +82,13 @@ struct SettingsPane: View {
         Card(title: "网络", systemImage: "network") {
             VStack(alignment: .leading, spacing: 12) {
                 InfoRow("TUN 模式",
-                        hint: "以 root 运行内核并接管全部流量。需要特权助手。") {
-                    Toggle("", isOn: $model.settings.tunEnabled)
+                        hint: "以 root 运行内核并接管全部流量。需要特权助手。开关后会自动重启内核。") {
+                    Toggle("", isOn: Binding(
+                        get: { model.settings.tunEnabled },
+                        set: { on in Task { await model.setTunEnabled(on) } }))
                         .labelsHidden()
                         .toggleStyle(.switch)
-                        .disabled(!model.helperInstalled)
+                        .disabled(!model.helperInstalled || model.busy || model.status.isBusy)
                 }
                 if !model.helperInstalled {
                     Label("需先安装下方的特权助手", systemImage: "exclamationmark.triangle")
@@ -139,6 +141,12 @@ struct SettingsPane: View {
                         .toggleStyle(.switch)
                 }
                 Divider()
+                InfoRow("启动时运行内核", hint: "打开应用后自动启动 mihomo") {
+                    Toggle("", isOn: $model.settings.startKernelOnLaunch)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                Divider()
                 InfoRow("在 Dock 中显示", hint: "关掉后退化为纯菜单栏应用") {
                     Toggle("", isOn: $model.settings.showInDock)
                         .labelsHidden()
@@ -173,9 +181,10 @@ struct SettingsPane: View {
                 }
 
                 Text("""
-                助手是以 root 身份常驻的后台服务，负责需要管理员权限的操作：TUN 模式、系统代理开关。
+                助手是以 root 身份常驻的后台服务，负责 TUN、系统代理，以及更新内核副本。
 
-                没有它时，每次这类操作都会弹出系统授权框。安装它只需要授权**一次**，之后就再也不会打扰你。
+                安装时授权一次即可；之后这些操作都不会再弹密码框（系统脚本授权本身也不支持触控 ID）。
+                若提示助手过旧，点下方「重新安装」升级即可。
                 """)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)

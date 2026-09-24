@@ -35,6 +35,7 @@ public enum Helper {
         case stopKernel      // 停止内核
         case kernelStatus    // 查询内核是否还活着
         case setSystemProxy  // 开关系统代理
+        case stageKernel     // 把用户侧内核副本安装到助手目录（免 osascript）
         case uninstall       // 自我卸载（移除 plist 与二进制）
     }
 
@@ -48,6 +49,8 @@ public enum Helper {
         public var port: Int?
         public var secret: String?
         public var enabled: Bool?
+        /// `stageKernel`：用户侧可读的 mihomo 路径（Application Support 或 app bundle）
+        public var kernelSource: String?
 
         public init(cmd: Command) { self.cmd = cmd.rawValue }
 

@@ -20,10 +20,9 @@ enum MenuDump {
         Task { @MainActor in
             if wantsRunning {
                 if let binary = try? Bundled.ensureKernel(),
-                   let ui = try? Bundled.ensureUI(),
                    let config = try? ConfigWriter.resolvedConfig(for: Settings()) {
                     await delegate.kernelForDump.start(config: config, binary: binary,
-                                                       dataDir: Paths.dataDir, uiDir: ui,
+                                                       dataDir: Paths.dataDir, uiDir: nil,
                                                        privileged: false)
                 }
             }

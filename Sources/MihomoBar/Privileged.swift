@@ -6,7 +6,10 @@ import HelperProtocol
 /// **常态路径是特权助手**（见 `HelperInstaller`）：一次授权安装，之后零弹框。
 /// 这里的 `osascript ... with administrator privileges` 只用于两件事：
 /// 1. 安装/卸载助手本身
-/// 2. 助手尚未安装时的降级路径（会弹授权框，支持触控 ID）
+/// 2. 助手尚未安装（或过旧不支持 stageKernel）时的降级路径
+///
+/// 注意：该授权框是密码输入，**不支持触控 ID**。这是 AppleScript 的限制，
+/// 不是漏接了指纹 API。要免密请装好特权助手。
 enum Privileged {
 
     /// 通过 osascript 以管理员身份执行一段 shell。
@@ -116,6 +119,32 @@ enum Privileged {
         if pid <= 0 { return false }
         if kill(pid, 0) == 0 { return true }
         return errno == EPERM
+    }
+
+    /// 进程常驻内存（RSS，字节）。对 root 内核也可用，不依赖 mihomo `/memory`。
+    ///
+    /// mihomo 的 `/connections.memory` 与 `/memory` WebSocket 在部分构建上恒为 0；
+    /// `proc_pidinfo` 对 root 进程会返回失败，所以这里走 `ps`（普通用户可读 RSS）。
+    static func residentBytes(of pid: pid_t) -> Int? {
+        guard pid > 0 else { return nil }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-o", "rss=", "-p", "\(pid)"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard proc.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard let kb = Int(text), kb > 0 else { return nil }
+        return kb * 1024
     }
 
     /// POSIX shell 单引号转义

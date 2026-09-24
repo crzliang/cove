@@ -258,6 +258,13 @@ func handle(_ request: Helper.Request) -> Helper.Response {
             try ProxySetter.set(enabled: enabled, port: request.port ?? 7890)
             return Helper.Response(ok: true, detail: enabled ? "系统代理已开启" : "系统代理已关闭")
 
+        case .stageKernel:
+            guard let source = request.kernelSource else {
+                return .failure("stageKernel 缺少 kernelSource")
+            }
+            let dest = try stageKernelBinary(from: source)
+            return Helper.Response(ok: true, detail: dest)
+
         case .uninstall:
             log("收到卸载请求")
             try supervisor.stop()
@@ -280,6 +287,46 @@ func uninstall() {
     try? FileManager.default.removeItem(atPath: target)
     log("助手已卸载，退出")
     exit(0)
+}
+
+/// 把用户侧的 mihomo 拷进助手目录，供 root 执行。
+///
+/// 只接受 Application Support / app bundle 里的路径，避免随便指定系统文件被 root 化。
+func stageKernelBinary(from source: String) throws -> String {
+    let srcURL = URL(fileURLWithPath: source).resolvingSymlinksInPath()
+    let src = srcURL.path
+    guard isAllowedKernelSource(src) else {
+        throw HelperFailure("拒绝的内核路径：\(src)")
+    }
+    guard FileManager.default.isExecutableFile(atPath: src) else {
+        throw HelperFailure("内核不可执行：\(src)")
+    }
+
+    let dir = Helper.socketDirectory
+    try FileManager.default.createDirectory(atPath: dir,
+                                            withIntermediateDirectories: true)
+    let dest = "\(dir)/mihomo"
+    // 先写临时文件再替换，避免拷到一半被拿去执行
+    let tmp = "\(dir)/mihomo.staging.\(getpid())"
+    try? FileManager.default.removeItem(atPath: tmp)
+    try FileManager.default.copyItem(atPath: src, toPath: tmp)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: tmp)
+    // 清隔离属性，否则 Gatekeeper 会把 root 启动的内核直接 SIGKILL
+    removexattr(tmp, "com.apple.quarantine", 0)
+    // install(1) 等价：归 root:wheel
+    chown(tmp, 0, 0)
+    try? FileManager.default.removeItem(atPath: dest)
+    try FileManager.default.moveItem(atPath: tmp, toPath: dest)
+    log("已更新内核副本 → \(dest)")
+    return dest
+}
+
+func isAllowedKernelSource(_ path: String) -> Bool {
+    if path.hasSuffix("/Library/Application Support/MihomoBar/mihomo") { return true }
+    if path.contains(".app/Contents/Resources/mihomo") { return true }
+    return false
 }
 
 func serveConnection(_ client: Int32) {

@@ -1,29 +1,45 @@
 import SwiftUI
+import AppKit
 
-/// 主窗口：标准 macOS 应用布局 —— 工具栏 + 侧边栏 + 内容区 + 状态栏。
+/// 主窗口：工具栏 + 可折叠侧边栏 + 内容区。
+///
+/// 侧栏折叠/展开只走按钮（工具栏 + 侧栏顶栏），不用 NavigationSplitView
+/// 的拖拽隐藏——后者折叠后很难再找回。
 struct MainWindow: View {
 
     @ObservedObject var model: AppModel
 
+    private let sidebarWidth: CGFloat = 210
+
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
-                // 工具栏必须分挂在两侧栏上，标题栏底色分界才会跟着 NSSplitView 走；
-                // 挂在 NavigationSplitView 外层时，分界线会偏左一小截。
-                .toolbar { sidebarToolbar }
-        } detail: {
-            detail
-                .toolbar { detailToolbar }
+        NavigationStack {
+            HStack(spacing: 0) {
+                if model.sidebarExpanded {
+                    sidebar
+                        .frame(width: sidebarWidth)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                } else {
+                    collapsedSidebarRail
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                }
+                Divider()
+                detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .animation(.easeInOut(duration: 0.2), value: model.sidebarExpanded)
+            .toolbar { windowToolbar }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) { statusBar }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if model.needsRestart || (model.banner.map { !$0.isError } == true) {
+                transientBottomBar
+            }
+        }
         .alert(item: alertBinding) { alert in
             Alert(title: Text(alert.title), message: Text(alert.message),
                   dismissButton: .default(Text("好")))
         }
     }
 
-    /// 侧边栏选择状态放在 AppModel 里（不能用 @State，见 AppModel 顶部注释）
     private var selection: Binding<AppModel.SidebarItem?> {
         Binding(
             get: { model.sidebarSelection },
@@ -31,30 +47,137 @@ struct MainWindow: View {
         )
     }
 
-    /// 让侧边栏首条与内容区标题处于同一条基线。
-    ///
-    /// 侧边栏 `List` 自身的顶部内边距很小（约 4pt），而内容区 `PaneScaffold`
-    /// 有 20pt 内边距，不补这一下侧边栏会明显偏上。
-    ///
-    /// 这个值是按实测调的，不要凭感觉改：截图后 OCR 出两侧首条文字的 y 坐标，
-    /// 差值就是要补的量。19pt 时两者都落在 y=48pt（窗口 697pt 高）。
-    private var sidebarTopInset: CGFloat { 19 }
-
     // MARK: - 侧边栏
 
     private var sidebar: some View {
-        // 扁平列表，不分组。
-        // 分组标题（"状态"/"代理"/"系统"）会占掉侧边栏顶部的垂直空间，
-        // 而内容区没有对应物，结果就是侧边栏首条比内容区标题低一截（实测差 14pt）。
-        // 六个条目本来也不需要分组。
-        List(selection: selection) {
-            ForEach(AppModel.SidebarItem.allCases) { item in
-                Label(item.title, systemImage: item.symbol)
-                    .tag(item)
+        VStack(spacing: 0) {
+            sidebarHeader
+            Divider()
+            List(selection: selection) {
+                ForEach(AppModel.SidebarItem.allCases) { item in
+                    Label(item.title, systemImage: item.symbol)
+                        .tag(item)
+                }
+            }
+            .listStyle(.sidebar)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                sidebarTrafficStats
             }
         }
-        .listStyle(.sidebar)
-        .padding(.top, sidebarTopInset)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+
+    /// 折叠后留下窄条，保证随时能点开。
+    private var collapsedSidebarRail: some View {
+        VStack(spacing: 8) {
+            Button {
+                model.sidebarExpanded = true
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 36, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help("展开侧边栏")
+            .padding(.top, 8)
+
+            ForEach(AppModel.SidebarItem.allCases) { item in
+                Button {
+                    model.sidebarSelection = item
+                    model.sidebarExpanded = true
+                } label: {
+                    Image(systemName: item.symbol)
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 36, height: 28)
+                        .foregroundStyle(model.sidebarSelection == item ? Color.accentColor : Color.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .help(item.title)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(width: 48)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    /// 侧栏顶栏：折叠按钮始终可见。
+    private var sidebarHeader: some View {
+        HStack(spacing: 8) {
+            Button {
+                model.sidebarExpanded = false
+            } label: {
+                Image(systemName: "sidebar.leading")
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 28, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help("折叠侧边栏")
+
+            Text("导航")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+
+    private var sidebarTrafficStats: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider()
+            if model.status.isRunning {
+                HStack(spacing: 0) {
+                    sidebarStat(title: "下行",
+                                value: TrafficMonitor.rate(model.traffic.down),
+                                tint: .blue)
+                    sidebarStat(title: "上行",
+                                value: TrafficMonitor.rate(model.traffic.up),
+                                tint: .purple)
+                }
+                if model.connectionTotals.down > 0 || model.connectionTotals.up > 0 {
+                    HStack(spacing: 0) {
+                        sidebarStat(title: "累计↓",
+                                    value: TrafficMonitor.volume(model.connectionTotals.down),
+                                    tint: .secondary)
+                        sidebarStat(title: "累计↑",
+                                    value: TrafficMonitor.volume(model.connectionTotals.up),
+                                    tint: .secondary)
+                    }
+                }
+            } else {
+                Text("内核未运行")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+            }
+        }
+        .padding(.bottom, 10)
+        .background(.bar)
+    }
+
+    private func sidebarStat(title: String, value: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 2)
     }
 
     // MARK: - 内容
@@ -65,6 +188,7 @@ struct MainWindow: View {
         case .overview:     OverviewPane(model: model)
         case .proxies:      ProxiesPane(model: model)
         case .connections:  ConnectionsPane(model: model)
+        case .rules:        RulesPane(model: model)
         case .subscription: SubscriptionPane(model: model)
         case .logs:         LogsPane(model: model)
         case .settings:     SettingsPane(model: model)
@@ -74,8 +198,17 @@ struct MainWindow: View {
     // MARK: - 工具栏
 
     @ToolbarContentBuilder
-    private var sidebarToolbar: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
+    private var windowToolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button {
+                model.sidebarExpanded.toggle()
+            } label: {
+                Image(systemName: "sidebar.left")
+            }
+            .help(model.sidebarExpanded ? "折叠侧边栏" : "展开侧边栏")
+        }
+
+        ToolbarItem(placement: .navigation) {
             Button {
                 Task { await model.toggleKernel() }
             } label: {
@@ -86,9 +219,7 @@ struct MainWindow: View {
             .help(model.status.isRunning ? "停止内核" : "启动内核")
         }
 
-        // 应用级状态放工具栏，而不是在侧边栏顶插一块 ——
-        // 侧边栏顶部插入自定义视图会让它的内容比内容区低一截，两者对不齐。
-        ToolbarItem(placement: .primaryAction) {
+        ToolbarItem(placement: .navigation) {
             HStack(spacing: 6) {
                 StatusDot(level: kernelLevel)
                 Text(model.status.isRunning
@@ -99,10 +230,7 @@ struct MainWindow: View {
                     .fixedSize()
             }
         }
-    }
 
-    @ToolbarContentBuilder
-    private var detailToolbar: some ToolbarContent {
         ToolbarItem(placement: .automatic) {
             Toggle(isOn: Binding(
                 get: { model.systemProxyOn },
@@ -131,16 +259,6 @@ struct MainWindow: View {
 
         ToolbarItem(placement: .primaryAction) {
             Button {
-                model.openDashboard()
-            } label: {
-                Label("浏览器面板", systemImage: "safari")
-            }
-            .disabled(!model.status.isRunning)
-            .help("在浏览器打开完整面板（规则、连接、流量曲线）")
-        }
-
-        ToolbarItem(placement: .primaryAction) {
-            Button {
                 Task { await model.reloadConfig() }
             } label: {
                 Label("重载配置", systemImage: "arrow.clockwise")
@@ -150,25 +268,11 @@ struct MainWindow: View {
         }
     }
 
-    // MARK: - 状态栏
+    // MARK: - 临时底栏
 
-    private var statusBar: some View {
+    private var transientBottomBar: some View {
         HStack(spacing: 14) {
-            HStack(spacing: 6) {
-                StatusDot(level: kernelLevel)
-                Text(model.status.isRunning ? "内核运行中 · 端口 \(model.kernel.port)" : model.status.label)
-            }
-
-            if model.status.isRunning {
-                Divider().frame(height: 11)
-                Label(TrafficMonitor.rate(model.traffic.down), systemImage: "arrow.down")
-                    .foregroundStyle(.blue)
-                Label(TrafficMonitor.rate(model.traffic.up), systemImage: "arrow.up")
-                    .foregroundStyle(.purple)
-            }
-
             if model.needsRestart {
-                Divider().frame(height: 11)
                 Button {
                     Task {
                         await model.toggleKernel()
@@ -182,12 +286,10 @@ struct MainWindow: View {
                 .foregroundStyle(.orange)
             }
 
-            Spacer()
-
-            if let banner = model.banner {
+            if let banner = model.banner, !banner.isError {
                 HStack(spacing: 5) {
-                    Image(systemName: banner.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(banner.isError ? .orange : .green)
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
                     Text(banner.text)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -202,14 +304,8 @@ struct MainWindow: View {
                 .foregroundStyle(.secondary)
             }
 
-            if model.helperRunning {
-                Image(systemName: "checkmark.shield.fill")
-                    .foregroundStyle(.green)
-                    .help("特权助手运行中：TUN 与系统代理无需授权")
-            }
+            Spacer(minLength: 0)
         }
-        .font(.system(size: 11))
-        .foregroundStyle(.secondary)
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
         .background(.bar)
@@ -225,8 +321,6 @@ struct MainWindow: View {
         }
     }
 
-    // MARK: - 错误弹窗
-
     private var alertBinding: Binding<AppModel.Banner?> {
         Binding(
             get: { model.banner?.isError == true ? model.banner : nil },
@@ -235,7 +329,6 @@ struct MainWindow: View {
     }
 }
 
-/// Alert 需要一个 Identifiable 数据源
 extension AppModel.Banner: CustomStringConvertible {
     var title: String { isError ? "出错了" : "提示" }
     var message: String { text }

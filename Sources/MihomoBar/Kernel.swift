@@ -80,7 +80,7 @@ final class Kernel: ObservableObject {
             try Paths.ensureDirs()
 
             // 上次留下的提权内核不会随 GUI 退出，先收掉，否则端口和 TUN 会打架
-            await adoptOrReapLeftover()
+            await adoptOrReapLeftover(privileged: privileged)
 
             // 1. 启动前预检：配置有问题会在这一步暴露，而不是等内核静默退出
             try Self.validate(config: config, binary: binary, dataDir: dataDir)
@@ -261,17 +261,41 @@ final class Kernel: ObservableObject {
     /// 处理上一次运行遗留的实例。
     ///
     /// 提权内核由 launchd 托管的助手持有，**不随 GUI 退出**。
-    /// 助手会自己记着 pid（`kernel.pid`），它的 `start` 已经内含
-    /// 「已有内核就先停掉」的逻辑，所以这里只需要询问一次。
-    private func adoptOrReapLeftover() async {
-        var req = Helper.Request(cmd: .kernelStatus)
-        req.protocolVersion = Helper.protocolVersion
-        guard let resp = try? HelperSocket.call(req), resp.running == true,
-              let pid = resp.pid else { return }
-        Self.appendLog("=== 收掉上次遗留的提权内核 pid=\(pid) ===")
-        var stop = Helper.Request(cmd: .stopKernel)
-        stop.protocolVersion = Helper.protocolVersion
-        _ = try? HelperSocket.call(stop)
+    /// 用户态内核若上次没停干净，也会占着 mixed-port（7890）导致新实例 bind 失败。
+    /// 非 TUN 启动时不询问助手，避免 socket 无响应时卡死启动流程。
+    private func adoptOrReapLeftover(privileged: Bool) async {
+        if privileged {
+            var req = Helper.Request(cmd: .kernelStatus)
+            req.protocolVersion = Helper.protocolVersion
+            if let resp = try? HelperSocket.call(req), resp.running == true,
+               let pid = resp.pid {
+                Self.appendLog("=== 收掉上次遗留的提权内核 pid=\(pid) ===")
+                var stop = Helper.Request(cmd: .stopKernel)
+                stop.protocolVersion = Helper.protocolVersion
+                _ = try? HelperSocket.call(stop)
+            }
+        }
+        Self.reapOrphanUserKernels()
+    }
+
+    /// 杀掉 Application Support 下残留的用户态 mihomo。
+    ///
+    /// 注意：不能在 MainActor 上 `Process.waitUntilExit()`，会和 runloop 互相等待死锁，
+    /// 表现为「点了启动却一直卡着、日志里连 === start 都没有」。
+    private static func reapOrphanUserKernels() {
+        let marker = Paths.root.appendingPathComponent("mihomo").path
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        p.arguments = ["-TERM", "-f", marker]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+        } catch {
+            return
+        }
+        appendLog("=== 已请求清理残留用户态内核 ===")
+        usleep(400_000)
     }
 
     // MARK: - 日志
@@ -323,7 +347,6 @@ final class Kernel: ObservableObject {
             "secret": secret,
             "controller": "http://127.0.0.1:\(port)",
             "unixSocket": Paths.controlSocket.path,
-            "ui": "http://127.0.0.1:\(port)/ui/",
             "privileged": isPrivileged,
         ]
         info["pid"] = rootPID.map { Int($0) } ?? process.map { Int($0.processIdentifier) } ?? 0

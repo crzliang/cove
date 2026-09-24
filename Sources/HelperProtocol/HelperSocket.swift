@@ -78,6 +78,11 @@ public enum HelperSocket {
         }
         defer { close(fd) }
 
+        // 读写超时，避免助手无响应时卡死主流程
+        var tv = timeval(tv_sec: 3, tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
         writeAll(fd, try Helper.encode(request))
         guard let line = readLine(fd), !line.isEmpty else {
             throw Helper.Error.connectionFailed("助手没有返回响应")

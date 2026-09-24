@@ -23,9 +23,10 @@ enum PaneRenderer {
             ("1-overview",     AnyView(OverviewPane(model: model))),
             ("2-proxies",      AnyView(ProxiesPane(model: model))),
             ("3-connections",  AnyView(ConnectionsPane(model: model))),
-            ("4-subscription", AnyView(SubscriptionPane(model: model))),
-            ("5-logs",         AnyView(LogsPane(model: model))),
-            ("6-settings",     AnyView(SettingsPane(model: model))),
+            ("4-rules",        AnyView(RulesPane(model: model))),
+            ("5-subscription", AnyView(SubscriptionPane(model: model))),
+            ("6-logs",         AnyView(LogsPane(model: model))),
+            ("7-settings",     AnyView(SettingsPane(model: model))),
         ]
 
         print("离屏渲染检查（内核未运行状态 —— 最容易踩空数据崩溃的场景）")
