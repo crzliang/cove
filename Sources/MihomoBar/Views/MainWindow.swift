@@ -30,9 +30,12 @@ struct MainWindow: View {
 
     /// 让侧边栏首条与内容区标题处于同一条基线。
     ///
-    /// 侧边栏的 `List` 自身内边距很小（约 4pt），而内容区 `PaneScaffold` 有 20pt
-    /// 顶部内边距。不补这一下，侧边栏会明显偏上。
-    private var sidebarTopInset: CGFloat { 5 }
+    /// 侧边栏 `List` 自身的顶部内边距很小（约 4pt），而内容区 `PaneScaffold`
+    /// 有 20pt 内边距，不补这一下侧边栏会明显偏上。
+    ///
+    /// 这个值是按实测调的，不要凭感觉改：截图后 OCR 出两侧首条文字的 y 坐标，
+    /// 差值就是要补的量。19pt 时两者都落在 y=48pt（窗口 697pt 高）。
+    private var sidebarTopInset: CGFloat { 19 }
 
     // MARK: - 侧边栏
 
