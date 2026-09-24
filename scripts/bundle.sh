@@ -57,8 +57,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleVersion</key>           <string>${VERSION}</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
-    <!-- 菜单栏应用：不进 Dock、不进 Cmd-Tab -->
-    <key>LSUIElement</key>               <true/>
+    <!-- 默认作为常规应用（有 Dock 图标）。
+         是否显示 Dock 图标由运行时 setActivationPolicy 控制，
+         用户可在设置里关掉，退化为纯菜单栏应用。 -->
+    <key>LSUIElement</key>               <false/>
     <key>NSHighResolutionCapable</key>   <true/>
     <key>NSSupportsAutomaticTermination</key><false/>
     <key>NSSupportsSuddenTermination</key>   <false/>

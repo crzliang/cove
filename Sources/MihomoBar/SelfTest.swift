@@ -174,6 +174,17 @@ enum SelfTest {
                 let running = HelperInstaller.isRunning
                 check("助手可应答 ping", running, running ? "正常运行" : "未运行（重启后由 launchd 拉起）")
                 if running {
+                    // Gatekeeper 回归检查。
+                    // 带 com.apple.quarantine 的二进制以 root 执行会被 SIGKILL（rc=137），
+                    // 且**不产生任何日志** —— 症状是“助手报启动成功但内核秒退”，
+                    // 肉眼基本查不出来，所以必须自动盯着。
+                    let staged = "\(Helper.socketDirectory)/mihomo"
+                    if FileManager.default.fileExists(atPath: staged) {
+                        check("提权内核已去隔离属性", !HelperInstaller.needsQuarantineClear(staged),
+                              HelperInstaller.needsQuarantineClear(staged)
+                              ? "带 com.apple.quarantine → root 执行会被 SIGKILL" : "干净")
+                    }
+
                     var req = Helper.Request(cmd: .kernelStatus)
                     req.protocolVersion = Helper.protocolVersion
                     if let resp = try? HelperSocket.call(req) {
@@ -263,6 +274,23 @@ enum SelfTest {
                 check("回显后台进程 pid", false, "输出='\(pidText)'")
             }
             try? FileManager.default.removeItem(at: probeLog)
+
+            // 9c. 设置解码的向后兼容性。
+            //     Swift 合成的 Codable 对缺失的非可选字段会直接失败 —— 那意味着
+            //     以后每加一个设置项，老用户的 settings.json 就会全部回退成默认值。
+            //     这里拿一份“缺少新字段的旧配置”验证手写解码确实能兼容。
+            let legacyJSON = #"{"subscriptionURL":"https://example.com/sub","mixedPort":1234}"#
+            if let data = legacyJSON.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode(Settings.self, from: data) {
+                check("旧版 settings.json 可解码", true,
+                      "订阅保留=\(decoded.subscriptionURL.contains("example.com"))"
+                      + " 端口=\(decoded.mixedPort)"
+                      + " 新字段默认=\(decoded.showInDock)")
+                check("旧配置的已有值未被覆盖",
+                      decoded.subscriptionURL == "https://example.com/sub" && decoded.mixedPort == 1234)
+            } else {
+                check("旧版 settings.json 可解码", false, "解析失败，老用户设置会丢失")
+            }
 
             // 10. 优雅停止
             let before = ProcessInfo.processInfo.systemUptime

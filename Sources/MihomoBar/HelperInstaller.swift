@@ -131,6 +131,13 @@ enum HelperInstaller {
         """
     }
 
+    /// 检查文件是否带 Gatekeeper 隔离属性。
+    /// 普通用户进程可以读 root 文件上的扩展属性，所以这里不需要提权。
+    static func needsQuarantineClear(_ path: String) -> Bool {
+        let size = getxattr(path, "com.apple.quarantine", nil, 0, 0, 0)
+        return size >= 0
+    }
+
     /// 内核二进制也放到助手目录，让助手能以 root 直接执行。
     ///
     /// 内核在 Application Support 里只有当前用户可写，root 虽然能读，
@@ -146,12 +153,24 @@ enum HelperInstaller {
         if let srcDate = (try? fm.attributesOfItem(atPath: source.path)[.modificationDate]) as? Date,
            let dstDate = (try? fm.attributesOfItem(atPath: destination)[.modificationDate]) as? Date,
            dstDate >= srcDate {
+            // 已经是最新的 —— 但仍然要确认隔离属性被清干净了，
+            // 否则会掉进「内核启动后秒退且无输出」的坑。
+            if needsQuarantineClear(destination) {
+                let q = Privileged.shellQuote
+                try Privileged.runBatch([
+                    "{ /usr/bin/xattr -d com.apple.quarantine \(q(destination)) 2>/dev/null || true; }",
+                ])
+            }
             return destination
         }
         let q = Privileged.shellQuote
+        // 去隔离属性是**必须**的：带 com.apple.quarantine 的二进制被 root 执行时
+        // 会被 Gatekeeper 直接 SIGKILL（rc=137）且零输出。
+        // 用 `{ ...; }` 包住是为了让 `|| true` 不影响外层 `&&` 链的短路语义。
         try Privileged.runBatch([
             "/bin/mkdir -p \(q(Helper.socketDirectory))",
             "/usr/bin/install -m 755 -o root -g wheel \(q(source.path)) \(q(destination))",
+            "{ /usr/bin/xattr -d com.apple.quarantine \(q(destination)) 2>/dev/null || true; }",
         ])
         return destination
     }

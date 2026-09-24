@@ -13,19 +13,61 @@ struct Settings: Codable, Equatable {
     var logLevel: String = "info"
     /// 高级：直接使用一个已有的完整 Clash 配置（只读，绝不修改）
     var customConfigPath: String = ""
+    /// 是否在 Dock 中显示图标。关掉就退化成纯菜单栏应用。
+    var showInDock: Bool = true
 
     static func load() -> Settings {
-        guard let data = try? Data(contentsOf: Paths.settings),
-              let s = try? JSONDecoder().decode(Settings.self, from: data) else {
+        guard let data = try? Data(contentsOf: Paths.settings) else { return Settings() }
+        do {
+            return try JSONDecoder().decode(Settings.self, from: data)
+        } catch {
+            // 解码失败不能默默吞掉 —— 用户会看到设置“自己变回去了”却不知为何。
+            // 备份一份脏数据，方便排查。
+            let backup = Paths.settings.appendingPathExtension("corrupt")
+            try? FileManager.default.removeItem(at: backup)
+            try? data.write(to: backup)
+            NSLog("[MihomoBar] settings.json 解析失败，已备份到 \(backup.path)：\(error)")
             return Settings()
         }
-        return s
     }
 
     func save() throws {
         try Paths.ensureDirs()
-        let data = try JSONEncoder().encode(self)
-        try data.write(to: Paths.settings, options: .atomic)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(self).write(to: Paths.settings, options: .atomic)
+    }
+}
+
+// MARK: - 向后兼容的解码
+
+extension Settings {
+
+    private enum CodingKeys: String, CodingKey {
+        case subscriptionURL, mixedPort, tunEnabled, mode, logLevel
+        case customConfigPath, showInDock
+    }
+
+    /// 手写解码，而不是用编译器合成的。
+    ///
+    /// Swift 合成的 `init(from:)` 对**缺失的非可选字段会直接抛 `keyNotFound`**，
+    /// 哪怕属性声明里写了默认值 —— 已实测确认。后果是：给 Settings 新增一个字段，
+    /// 就会让所有老用户的 `settings.json` 解码失败，全部设置静默回退成默认值。
+    ///
+    /// 改用 `decodeIfPresent` + 默认值，之后新增字段就永远安全。
+    ///
+    /// 注意：这个 extension 必须写在 struct 体**外面**。一旦把 `init(from:)`
+    /// 写进 struct 体内，编译器就不再合成 `init()`，所有 `Settings()` 调用都会编译失败。
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Settings()   // 默认值来源
+        subscriptionURL  = try c.decodeIfPresent(String.self, forKey: .subscriptionURL)  ?? d.subscriptionURL
+        mixedPort        = try c.decodeIfPresent(Int.self,    forKey: .mixedPort)        ?? d.mixedPort
+        tunEnabled       = try c.decodeIfPresent(Bool.self,   forKey: .tunEnabled)       ?? d.tunEnabled
+        mode             = try c.decodeIfPresent(String.self, forKey: .mode)             ?? d.mode
+        logLevel         = try c.decodeIfPresent(String.self, forKey: .logLevel)         ?? d.logLevel
+        customConfigPath = try c.decodeIfPresent(String.self, forKey: .customConfigPath) ?? d.customConfigPath
+        showInDock       = try c.decodeIfPresent(Bool.self,   forKey: .showInDock)       ?? d.showInDock
     }
 }
 

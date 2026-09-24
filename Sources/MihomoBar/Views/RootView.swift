@@ -7,7 +7,15 @@ import SwiftUI
 /// 这里只放每天真正会用到的那几个开关。
 struct RootView: View {
 
+    /// 同一个视图在两种容器里复用：菜单栏 popover 用固定窄尺寸，
+    /// 独立窗口用可拉伸尺寸。
+    enum Presentation {
+        case popover
+        case window
+    }
+
     @ObservedObject var model: AppModel
+    var presentation: Presentation = .popover
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,11 +40,10 @@ struct RootView: View {
                 .padding(14)
             }
         }
-        .frame(width: 400, height: 560)
+        .modifier(PresentationSize(presentation: presentation))
     }
 
     // MARK: - 头部
-
     private var header: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
@@ -267,6 +274,15 @@ struct RootView: View {
                 .disabled(!model.status.isRunning || model.busy)
             }
 
+            // popover 里给一个入口回到主窗口；主窗口自己不需要这个按钮
+            if presentation == .popover {
+                Button {
+                    model.onOpenMainWindow?()
+                } label: {
+                    Label("打开主窗口", systemImage: "macwindow").frame(maxWidth: .infinity)
+                }
+            }
+
             HStack(spacing: 8) {
                 Button {
                     model.showLog.toggle()
@@ -380,6 +396,16 @@ struct RootView: View {
             .toggleStyle(.switch)
             .disabled(!LaunchAtLogin.isAvailable)
 
+            Toggle(isOn: $model.settings.showInDock) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("在 Dock 中显示")
+                    Text("关掉后只保留菜单栏图标")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
             HStack {
                 Spacer()
                 Button("保存") {
@@ -449,5 +475,20 @@ struct RootView: View {
         .padding(8)
         .background((banner.isError ? Color.orange : Color.blue).opacity(0.12))
         .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+/// popover 需要固定尺寸（它不会自适应），
+/// 独立窗口则只设下限，让用户能自由拉伸。
+private struct PresentationSize: ViewModifier {
+    let presentation: RootView.Presentation
+
+    func body(content: Content) -> some View {
+        switch presentation {
+        case .popover:
+            content.frame(width: 400, height: 560)
+        case .window:
+            content.frame(minWidth: 460, minHeight: 520)
+        }
     }
 }

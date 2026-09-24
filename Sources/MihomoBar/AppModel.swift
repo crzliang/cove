@@ -48,6 +48,10 @@ final class AppModel: ObservableObject {
     }
 
     let kernel = Kernel()
+
+    /// 由 AppDelegate 注入：打开独立主窗口。
+    /// 用回调而不是直接引用 AppDelegate，避免 AppModel 依赖 UI 层。
+    var onOpenMainWindow: (() -> Void)?
     private var statusTimer: Timer?
     private var ctl: CtlClient? {
         guard let endpoint = kernel.endpoint else { return nil }

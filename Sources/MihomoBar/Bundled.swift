@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// 定位随 app 一起分发的 mihomo 内核与 MetaCubeXD。
 ///
@@ -62,7 +63,17 @@ enum Bundled {
             try fm.copyItem(at: src, to: dest)
             try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dest.path)
         }
+        // Gatekeeper 的隔离属性必须去掉。
+        // 内核由 root 助手执行时，带 quarantine 的二进制会被内核直接 SIGKILL
+        // （rc=137）且不产生任何输出，排查起来极痛苦。
+        Self.clearQuarantine(dest.path)
         return dest
+    }
+
+    /// 清除 `com.apple.quarantine`。属性不存在时返回非 0，属正常情况。
+    @discardableResult
+    static func clearQuarantine(_ path: String) -> Bool {
+        removexattr(path, "com.apple.quarantine", 0) == 0
     }
 
     /// 把 MetaCubeXD 静态文件同步到 data 目录，用于 `-ext-ui`。
