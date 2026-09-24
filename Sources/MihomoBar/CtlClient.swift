@@ -60,6 +60,19 @@ struct CtlClient {
         let message: String?
     }
 
+    struct ProviderEntry: Decodable {
+        let name: String?
+        let vehicleType: String?
+        let updatedAt: String?
+        let proxies: [ProxyEntry]?
+
+        var nodeCount: Int { proxies?.count ?? 0 }
+    }
+
+    struct ProvidersResponse: Decodable {
+        let providers: [String: ProviderEntry]
+    }
+
     // MARK: - 请求
 
     private func request(_ path: String, method: String = "GET", body: [String: Any]? = nil) throws -> URLRequest {
@@ -130,6 +143,19 @@ struct CtlClient {
         ]
         let result: DelayResponse = try await fetch(comps.string ?? "")
         return result.delay
+    }
+
+    /// 策略组订阅（proxy-providers）当前状态：节点数、最近更新时间
+    func providers() async throws -> [String: ProviderEntry] {
+        let response: ProvidersResponse = try await fetch("/providers/proxies")
+        return response.providers
+    }
+
+    /// 命令内核立即重新拉取订阅。
+    /// 平时不需要调 —— `proxy-providers` 配了 `interval` 后内核会自己刷新。
+    func updateProvider(_ name: String) async throws {
+        let n = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        try await perform("/providers/proxies/\(n)", method: "PUT")
     }
 
     /// 让内核重新读取磁盘上的配置（订阅更新后调用）

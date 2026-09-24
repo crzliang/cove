@@ -54,10 +54,39 @@ mihomo -d <datadir> -f <用户配置> \
 ### 5. 复杂 UI 交给 MetaCubeXD
 
 节点列表、规则编辑、连接列表、流量曲线在浏览器面板里（点「面板」）。
-菜单栏只放每天真正会用的：启停、系统代理、模式、策略组快切、日志。
+菜单栏只放每天真正会用的：启停、系统代理、模式、策略组快切、订阅状态、日志。
 
 面板是 **响应式 PWA** —— 手机连同一个地址（需开 `allow-lan`）就是第二个客户端。
 多客户端能力由内核提供，不需要自己实现。
+
+### 6. TUN 模式需要 root，走 osascript 提权
+
+内核以 root 启动的方式：
+
+```sh
+do shell script "{ cd <dir> && <mihomo> <args>; } >> <log> 2>&1 < /dev/null & echo $!" \
+  with administrator privileges
+```
+
+两个必须踩对的点（都有自检盯着）：
+
+1. **整条命令要用 `{ …; }` 包住再重定向**。如果只给最后一个命令加重定向
+   （`cd X && mihomo … >> log &`），后台子 shell 会继续持有调用方的 stdout，
+   `do shell script` 会阻塞到内核退出 —— 对内核来说就是永远。
+   实测：错误写法 30019 ms，正确写法 9 ms。
+2. **末尾 `echo $!`** 是唯一能从提权 shell 里拿回 pid 的方式。
+
+提权内核被 launchd 接管，**不随 GUI 退出**。所以：
+
+* 退出时会提示内核是否真的收干净了，没收干净会弹窗告警（避免留个 root 进程占着 TUN 路由）
+* 下次启动时 `adoptOrReapLeftover()` 先收掉上次遗留的实例
+
+### 7. 开机自启用 SMAppService
+
+macOS 13+ 的 `SMAppService.mainApp`，注册 app 自身，不需要写 plist、不需要 helper。
+
+⚠️ **需要把 app 放到 `/Applications`**，系统才能可靠跟踪它。
+从 `build/` 直接运行会显示 `.notFound`，UI 上会提示。
 
 ---
 
@@ -98,11 +127,14 @@ open build/MihomoBar.app
 ./.build/debug/MihomoBar --selftest
 ```
 
-会依次检查：定位内核 → 生成配置 → 分配端口 → `-t` 预检 → 启动 →
-`/version` `/configs` `/proxies` → 切模式 → 重载 → 面板可达 →
-`runtime.json` → SIGTERM 优雅停止 → 清理 socket → 日志非空。
+33 项，覆盖：资源定位 → 生成配置 → 分配端口 → `-t` 预检 → 启动 →
+`/version` `/configs` `/proxies` `/providers/proxies` → 切模式 → 重载 →
+面板可达 → `runtime.json` → 提权命令构造与后台启动机制 → SIGTERM 优雅停止 →
+清理 socket → 日志非空。
 
-不做任何系统级改动。
+不做任何系统级改动，不弹授权框。
+
+自检已实际抓出过两个 bug：资源目录被整个当成内核拷贝、提权重定向写法导致阻塞 30 秒。
 
 ---
 
@@ -113,16 +145,25 @@ open build/MihomoBar.app
 | 启动内核（代理端口模式） | 否 |
 | 打开浏览器面板 | 否 |
 | **系统代理开关** | **是**（`networksetup -setwebproxy`） |
-| **TUN 模式** | **是** |
+| **TUN 模式** | **是**（内核本身要 root） |
 
-系统代理通过 `osascript ... with administrator privileges` 一次性授权，
-零签名成本、立刻可用；缺点是重启后需重新授权一次。
+两条路径都走 `osascript ... with administrator privileges`，零签名成本、立刻可用。
+代价是重启后需要重新授权一次（授权缓存约 5 分钟）。
 
 将来要免去反复授权，可换成 `SMAppService` 注册 LaunchDaemon helper
 （Clash Verge 的做法）。`Privileged.swift` 的接口已为此预留，可平滑替换。
 
-TUN 模式目前**只写入配置**，内核仍以当前用户身份运行，因此不会生效。
-要真正启用需要把内核也提权启动。
+---
+
+## 开机自启
+
+设置面板里的「开机自启」开关，底层是 `SMAppService.mainApp`。
+**先把 app 放到 `/Applications`** 再打开这个开关：
+
+```bash
+cp -R build/MihomoBar.app /Applications/
+open /Applications/MihomoBar.app
+```
 
 ---
 
@@ -130,15 +171,16 @@ TUN 模式目前**只写入配置**，内核仍以当前用户身份运行，因
 
 ```
 Sources/MihomoBar/
-  App.swift            入口（@main）
-  AppDelegate.swift    NSStatusItem + NSPopover + 右键菜单
+  App.swift            入口（@main），含 --selftest 分支
+  AppDelegate.swift    NSStatusItem + NSPopover + 右键菜单 + 退出收尾
   AppModel.swift       共享状态（刻意不用 @State）
-  Kernel.swift         进程生命周期 / 端口 / 预检 / 日志
+  Kernel.swift         进程生命周期 / 提权启动 / 端口 / 预检 / 日志
   CtlClient.swift      external-controller REST 客户端
-  Privileged.swift     osascript 提权 + networksetup
+  Privileged.swift     osascript 提权 + networksetup + 异步启动机制
+  LaunchAtLogin.swift  SMAppService 开机自启
   ConfigWriter.swift   生成配置（永不写用户配置）
   Bundled.swift        资源定位与内核副本
-  SelfTest.swift       headless 自检
+  SelfTest.swift       headless 自检（33 项）
   Views/RootView.swift 弹出面板
 
 Resources/             mihomo + ui/（gitignore，用脚本获取）
@@ -161,10 +203,9 @@ settings.json  应用设置
 
 ## 待办
 
-- [ ] 开机自启（`SMAppService.mainApp.register()`）
-- [ ] 订阅更新后自动 `PUT /configs` 重载
-- [ ] TUN 模式提权启动内核
-- [ ] `SMAppService` helper 替代 osascript
+- [ ] 订阅定时刷新状态显示（内核已在刷，UI 只显示 `updatedAt`）
+- [ ] `SMAppService` helper 替代 osascript，免去反复授权
 - [ ] 流量速率显示（`/traffic` 是流式接口）
 - [ ] 用 `NSStatusItem.button.image` 叠加延迟数字
-- [ ] 图标资源
+- [ ] 图标资源（现在用 SF Symbols）
+- [ ] 内核版本更新（替换 `~/Library/Application Support/MihomoBar/mihomo` 即可）

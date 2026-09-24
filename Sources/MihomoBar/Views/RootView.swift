@@ -3,7 +3,7 @@ import SwiftUI
 /// 菜单栏弹出面板。
 ///
 /// 有意保持精简：复杂 UI（完整节点列表、规则、连接、流量曲线）
-/// 由内核自带的 MetaCubeXD 在浏览器里提供，点「打开面板」即可。
+/// 由内核自带的 MetaCubeXD 在浏览器里提供，点「面板」即可。
 /// 这里只放每天真正会用到的那几个开关。
 struct RootView: View {
 
@@ -16,21 +16,18 @@ struct RootView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     controls
+                    if model.needsRestart {
+                        restartHint
+                    }
                     if model.status.isRunning && !model.groups.isEmpty {
                         Divider()
                         groupsSection
                     }
                     Divider()
                     actions
-                    if model.showLog {
-                        logSection
-                    }
-                    if model.showSettings {
-                        settingsSection
-                    }
-                    if let banner = model.banner {
-                        bannerView(banner)
-                    }
+                    if model.showLog { logSection }
+                    if model.showSettings { settingsSection }
+                    if let banner = model.banner { bannerView(banner) }
                 }
                 .padding(14)
             }
@@ -44,14 +41,19 @@ struct RootView: View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 8, height: 8)
-                    Text("MihomoBar")
-                        .font(.headline)
+                    Circle().fill(statusColor).frame(width: 8, height: 8)
+                    Text("MihomoBar").font(.headline)
                     Text(model.status.label)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if model.kernel.isPrivileged {
+                        Text("root")
+                            .font(.system(size: 9, weight: .semibold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.2))
+                            .clipShape(Capsule())
+                    }
                 }
                 Text(model.versionLine)
                     .font(.system(size: 10, design: .monospaced))
@@ -60,6 +62,7 @@ struct RootView: View {
                     .truncationMode(.middle)
             }
             Spacer()
+            if model.busy { ProgressView().controlSize(.small) }
             Button {
                 model.showSettings.toggle()
             } label: {
@@ -84,17 +87,15 @@ struct RootView: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Button {
-                    Task { await model.toggleKernel() }
-                } label: {
-                    Label(model.status.isRunning ? "停止内核" : "启动内核",
-                          systemImage: model.status.isRunning ? "stop.fill" : "play.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.large)
-                .disabled(model.status.isBusy)
+            Button {
+                Task { await model.toggleKernel() }
+            } label: {
+                Label(model.status.isRunning ? "停止内核" : "启动内核",
+                      systemImage: model.status.isRunning ? "stop.fill" : "play.fill")
+                    .frame(maxWidth: .infinity)
             }
+            .controlSize(.large)
+            .disabled(model.status.isBusy || model.busy)
 
             Toggle(isOn: Binding(
                 get: { model.systemProxyOn },
@@ -102,17 +103,34 @@ struct RootView: View {
             )) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("系统代理")
-                    Text("需要管理员授权；端口 \(String(model.settings.mixedPort))")
+                    Text("需要管理员授权 · 127.0.0.1:\(String(model.settings.mixedPort))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
             }
             .toggleStyle(.switch)
-            .disabled(!model.status.isRunning)
+            .disabled(!model.status.isRunning || model.busy)
+
+            if !model.settings.subscriptionURL.isEmpty && model.settings.customConfigPath.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(model.providerInfo ?? "订阅加载中…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("立即更新") {
+                        Task { await model.refreshSubscription() }
+                    }
+                    .font(.caption2)
+                    .buttonStyle(.borderless)
+                    .disabled(!model.status.isRunning || model.busy)
+                }
+            }
 
             HStack(spacing: 6) {
-                Text("模式")
-                    .font(.callout)
+                Text("模式").font(.callout)
                 Picker("", selection: Binding(
                     get: { model.mode },
                     set: { m in Task { await model.setMode(m) } }
@@ -123,9 +141,30 @@ struct RootView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .disabled(!model.status.isRunning)
+                .disabled(!model.status.isRunning || model.busy)
             }
         }
+    }
+
+    private var restartHint: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                .foregroundStyle(.orange)
+            Text("设置已改，需重启内核生效")
+                .font(.caption)
+            Spacer()
+            Button("重启") {
+                Task {
+                    await model.toggleKernel()
+                    await model.startKernel()
+                }
+            }
+            .font(.caption)
+            .disabled(model.busy || model.status.isBusy)
+        }
+        .padding(8)
+        .background(Color.orange.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     // MARK: - 策略组
@@ -146,8 +185,7 @@ struct RootView: View {
                                   ? "chevron.down" : "chevron.right")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
-                            Text(group.name)
-                                .font(.callout)
+                            Text(group.name).font(.callout)
                             Spacer()
                             Text(group.now)
                                 .font(.caption)
@@ -174,7 +212,8 @@ struct RootView: View {
                                         Image(systemName: node == group.now
                                               ? "checkmark.circle.fill" : "circle")
                                             .font(.caption2)
-                                            .foregroundStyle(node == group.now ? Color.accentColor : .secondary)
+                                            .foregroundStyle(node == group.now
+                                                             ? Color.accentColor : .secondary)
                                         Text(node)
                                             .font(.caption)
                                             .lineLimit(1)
@@ -214,40 +253,35 @@ struct RootView: View {
                 Button {
                     model.openDashboard()
                 } label: {
-                    Label("面板", systemImage: "safari")
-                        .frame(maxWidth: .infinity)
+                    Label("面板", systemImage: "safari").frame(maxWidth: .infinity)
                 }
                 .disabled(!model.status.isRunning)
 
                 Button {
                     Task { await model.reloadConfig() }
                 } label: {
-                    Label("重载", systemImage: "arrow.clockwise")
-                        .frame(maxWidth: .infinity)
+                    Label("重载", systemImage: "arrow.clockwise").frame(maxWidth: .infinity)
                 }
-                .disabled(!model.status.isRunning)
+                .disabled(!model.status.isRunning || model.busy)
             }
 
             HStack(spacing: 8) {
                 Button {
                     model.showLog.toggle()
                 } label: {
-                    Label("日志", systemImage: "doc.text")
-                        .frame(maxWidth: .infinity)
+                    Label("日志", systemImage: "doc.text").frame(maxWidth: .infinity)
                 }
                 Button {
                     model.revealDataDir()
                 } label: {
-                    Label("数据目录", systemImage: "folder")
-                        .frame(maxWidth: .infinity)
+                    Label("数据目录", systemImage: "folder").frame(maxWidth: .infinity)
                 }
             }
 
             Button {
                 NSApp.terminate(nil)
             } label: {
-                Text("退出 MihomoBar")
-                    .frame(maxWidth: .infinity)
+                Text("退出 MihomoBar").frame(maxWidth: .infinity)
             }
             .controlSize(.small)
         }
@@ -263,7 +297,7 @@ struct RootView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("刷新") { model.objectWillChange.send() }
+                Button("刷新") { model.refreshLog() }
                     .font(.caption2)
                     .buttonStyle(.borderless)
             }
@@ -282,7 +316,7 @@ struct RootView: View {
     // MARK: - 设置
 
     private var settingsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("设置")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -311,8 +345,31 @@ struct RootView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
-            Toggle("TUN 模式（需要 root，见 README）", isOn: $model.settings.tunEnabled)
-                .font(.caption)
+            Divider()
+
+            Toggle(isOn: $model.settings.tunEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("TUN 模式")
+                    Text("启动内核时会请求管理员授权，以 root 运行")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
+            Toggle(isOn: Binding(
+                get: { model.launchAtLogin },
+                set: { on in Task { await model.setLaunchAtLogin(on) } }
+            )) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("开机自启")
+                    Text(LaunchAtLogin.statusDescription)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(!LaunchAtLogin.isAvailable)
 
             HStack {
                 Spacer()
@@ -342,8 +399,7 @@ struct RootView: View {
             Button {
                 model.banner = nil
             } label: {
-                Image(systemName: "xmark")
-                    .font(.caption2)
+                Image(systemName: "xmark").font(.caption2)
             }
             .buttonStyle(.borderless)
         }

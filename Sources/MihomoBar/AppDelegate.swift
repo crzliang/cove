@@ -112,13 +112,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - 退出
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // 直接退出会把系统留在「代理开着但内核已死」的状态，
-        // 所以这里同步收尾，全部用 best-effort。
+        // 直接退出会把系统留在「代理开着但内核已死」的状态，所以这里同步收尾。
         model.stopPolling()
         if model.systemProxyOn {
             try? SystemProxy.disable()
         }
         model.kernel.stop()
+
+        // 提权内核如果不收干净，会留下一个 root 进程占着 TUN 接口和路由，
+        // 下次启动会莫名其妙地失败。这里必须让用户知道。
+        if let pid = model.kernel.runningPID, Privileged.processExists(pid) {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "内核仍在以 root 运行"
+            alert.informativeText = """
+            pid \(pid) 未能停止（通常是授权被取消）。
+
+            继续退出会留下一个后台 root 进程占用 TUN 接口与路由，
+            下次启动 MihomoBar 时会被自动收掉。
+
+            清理命令：sudo kill \(pid)
+            """
+            alert.addButton(withTitle: "仍然退出")
+            alert.addButton(withTitle: "取消退出")
+            if alert.runModal() == .alertSecondButtonReturn {
+                // 用户选择留下来，重新开始轮询，不要留下一个不再更新的界面
+                model.startPolling()
+                return .terminateCancel
+            }
+        }
         return .terminateNow
     }
 

@@ -14,7 +14,6 @@ enum Privileged {
     /// 调用方负责把所有命令合并成一次调用，避免弹多次授权框。
     @discardableResult
     static func runShell(_ command: String) throws -> String {
-        // AppleScript 字符串里需要转义的只有反斜杠和双引号
         let escaped = command
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
@@ -34,23 +33,95 @@ enum Privileged {
 
         guard p.terminationStatus == 0 else {
             let msg = String(data: errData, encoding: .utf8) ?? ""
-            if msg.contains("-128") {
-                throw PrivilegedError.cancelled
-            }
+            if msg.contains("-128") { throw PrivilegedError.cancelled }
             throw PrivilegedError.failed(msg.isEmpty ? "退出码 \(p.terminationStatus)" : msg)
         }
         return String(data: outData, encoding: .utf8) ?? ""
+    }
+
+    /// 以管理员身份在**后台**启动一个进程，返回它的 pid。
+    ///
+    /// 两个关键细节（已实测验证）：
+    ///
+    /// 1. 后台进程的 stdout/stderr **必须重定向到文件**。否则它继承 osascript
+    ///    的管道，`do shell script` 会一直阻塞到该进程退出才返回 —— 这是个静默的死锁。
+    /// 2. 末尾的 `echo $!` 是唯一能从提权 shell 里拿回 pid 的方式。
+    ///
+    /// 提权进程在 `do shell script` 返回后会被 launchd 接管，与 GUI 生命周期解耦，
+    /// 所以退出 GUI 不会连带杀死内核（这对 TUN 模式是必要的）。
+    static func spawnAsRoot(executable: URL,
+                            arguments: [String],
+                            logPath: String,
+                            workingDirectory: String? = nil) throws -> pid_t {
+        let cmd = buildBackgroundCommand(executable: executable,
+                                         arguments: arguments,
+                                         logPath: logPath,
+                                         workingDirectory: workingDirectory)
+        let out = try runShell(cmd)
+        let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pid = pid_t(trimmed) else {
+            throw PrivilegedError.badPID(trimmed)
+        }
+        return pid
+    }
+
+    /// 拼出「以后台方式启动并回显 pid」的 shell 命令。
+    ///
+    /// 独立成函数是为了可测：自检会拿它跟一个无特权的 `sh -c` 跑一遍，
+    /// 在不弹授权框的前提下验证整条机制。
+    ///
+    /// ⚠️ 整条命令（含 `cd`）**必须包在花括号里一起重定向**。
+    /// 若只给最后一个命令加重定向，例如：
+    ///
+    ///     cd X && mihomo ... >> log 2>&1 &
+    ///
+    /// 后台子 shell 会继续持有调用方的 stdout，于是 `do shell script`（以及任何
+    /// 读管道的一方）会阻塞到该进程退出为止 —— 对内核来说就是永远。
+    /// 实测：这种写法耗时 30019 ms，包裹写法 9 ms。
+    static func buildBackgroundCommand(executable: URL,
+                                       arguments: [String],
+                                       logPath: String,
+                                       workingDirectory: String? = nil) -> String {
+        var body = ""
+        if let dir = workingDirectory {
+            body += "cd \(shellQuote(dir)) && "
+        }
+        body += ([executable.path] + arguments).map(shellQuote).joined(separator: " ")
+        return "{ \(body); } >> \(shellQuote(logPath)) 2>&1 < /dev/null & echo $!"
+    }
+
+    /// 给提权进程发信号。内核必须收到 SIGTERM 而不是 SIGKILL，
+    /// 否则 TUN 模式会残留 utun 接口和路由。
+    static func signal(_ pid: pid_t, _ sig: Int32) throws {
+        try runShell("kill -\(sig) \(pid)")
+    }
+
+    /// 判断进程是否存活。
+    ///
+    /// 注意 `kill(pid, 0)` 对 root 进程会返回 EPERM —— 那表示**进程存在但无权发信号**，
+    /// 而不是不存在。只有 ESRCH 才代表真正退出。
+    static func processExists(_ pid: pid_t) -> Bool {
+        if pid <= 0 { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    /// POSIX shell 单引号转义
+    static func shellQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 
 enum PrivilegedError: Error, CustomStringConvertible {
     case cancelled
     case failed(String)
+    case badPID(String)
 
     var description: String {
         switch self {
         case .cancelled:        return "已取消授权"
         case .failed(let m):    return "提权执行失败：\(m.trimmingCharacters(in: .whitespacesAndNewlines))"
+        case .badPID(let s):    return "提权进程未返回有效 pid（返回内容：\(s.prefix(80))）"
         }
     }
 }

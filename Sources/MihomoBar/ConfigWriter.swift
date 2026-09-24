@@ -36,6 +36,9 @@ struct Settings: Codable, Equatable {
 /// 否则这里生成一份应用自有的 `generated.yaml`。
 enum ConfigWriter {
 
+    /// `proxy-providers` 里订阅的名字。CtlClient 刷新订阅时要用同一个名字。
+    static let providerName = "sub"
+
     /// 返回应当传给内核 `-f` 的配置文件路径。
     static func resolvedConfig(for settings: Settings) throws -> URL {
         let custom = settings.customConfigPath.trimmingCharacters(in: .whitespaces)
@@ -119,7 +122,7 @@ enum ConfigWriter {
             yaml += """
 
             proxy-providers:
-              sub:
+              \(providerName):
                 type: http
                 url: "\(escape(sub))"
                 path: ./providers/sub.yaml
@@ -136,14 +139,14 @@ enum ConfigWriter {
                   - ♻️ 自动选择
                   - DIRECT
                 use:
-                  - sub
+                  - \(providerName)
               - name: ♻️ 自动选择
                 type: url-test
                 tolerance: 50
                 url: https://www.gstatic.com/generate_204
                 interval: 300
                 use:
-                  - sub
+                  - \(providerName)
 
             rules:
               - GEOIP,LAN,DIRECT,no-resolve
