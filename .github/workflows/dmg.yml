@@ -32,7 +32,7 @@ jobs:
       - name: 打包 dmg
         run: bash scripts/dmg.sh
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: Cove-${{ env.VERSION }}${{ env.DMG_SUFFIX }}
           path: build/Cove-*.dmg
