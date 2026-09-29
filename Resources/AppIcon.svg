@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- }•®Ø
+¯} -> Ep!ßùœŸ( -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F1F3F6"/>
+    </linearGradient>
+
+    <!-- ;SØR -> Ý -->
+    <linearGradient id="node" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#34D399"/>
+      <stop offset="100%" stop-color="#3B82F6"/>
+    </linearGradient>
+
+    <clipPath id="squircle">
+      <rect x="100" y="100" width="824" height="824" rx="184" ry="184"/>
+    </clipPath>
+  </defs>
+
+  <!-- }• -->
+  <g clip-path="url(#squircle)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#bg)"/>
+  </g>
+
+  <!-- ¹Ï¹ùœŸþý	ÙB -->
+  <rect x="100" y="100" width="824" height="824" rx="184" ry="184"
+        fill="none" stroke="#000000" stroke-opacity="0.06" stroke-width="2"/>
+
+  <!-- -Ã‚¹QÜ -->
+  <g transform="translate(512,512)">
+    <!-- Þ¿ -->
+    <g stroke="url(#node)" stroke-width="26" stroke-linecap="round" fill="none">
+      <line x1="-170" y1="120" x2="0" y2="-150"/>
+      <line x1="170" y1="120" x2="0" y2="-150"/>
+      <line x1="-170" y1="120" x2="170" y2="120"/>
+    </g>
+    <!-- 	*‚¹ -->
+    <circle cx="-170" cy="120" r="58" fill="url(#node)"/>
+    <circle cx="170" cy="120" r="58" fill="url(#node)"/>
+    <circle cx="0" cy="-150" r="72" fill="url(#node)"/>
+    <!-- -Ã‚¹ØI -->
+    <circle cx="-18" cy="-172" r="20" fill="#FFFFFF" fill-opacity="0.35"/>
+  </g>
+</svg>

@@ -8,7 +8,7 @@ import Foundation
 public enum Helper {
 
     /// 助手的 launchd label，同时用于 plist 文件名
-    public static let label = "local.mihomobar.helper"
+    public static let label = "local.cove.helper"
 
     /// 助手二进制在系统里的固定位置。
     /// 放在 /Library/PrivilegedHelperTools 而不是 app bundle 内，
@@ -19,7 +19,7 @@ public enum Helper {
     public static let plistPath = "/Library/LaunchDaemons/\(label).plist"
 
     /// 控制 socket 所在目录（root 所有，管理员组可访问）
-    public static let socketDirectory = "/var/run/local.mihomobar"
+    public static let socketDirectory = "/var/run/local.cove"
 
     /// 控制 socket
     public static let socketPath = "\(socketDirectory)/helper.sock"

@@ -1,4 +1,4 @@
-# MihomoBar
+# Cove
 
 macOS 菜单栏 mihomo 代理客户端。原生 Swift + AppKit，**无 webview**。
 
@@ -26,7 +26,7 @@ GUI 本体      ~1.3 MB（release）
 菜单内容在 `menuNeedsUpdate` 里按当前状态重建，不需要额外同步逻辑。
 
 ```
-MihomoBar · 运行中 :63415          ← 只读状态，扫一眼用
+Cove · 运行中 :63415          ← 只读状态，扫一眼用
 ↓ 1.2 MB/s    ↑ 340 KB/s
 ──────────────
 停止内核
@@ -38,7 +38,7 @@ MihomoBar · 运行中 :63415          ← 只读状态，扫一眼用
 显示主窗口
 数据目录
 ──────────────
-退出 MihomoBar               ⌘Q
+退出 Cove               ⌘Q
 ```
 
 窗口定位规则很简单：
@@ -86,7 +86,7 @@ mihomo -d <datadir> -f <用户配置> \
 
 9090 会和 ClashX / Clash Verge / 其他 mihomo 实例抢端口。
 启动时 `bind(127.0.0.1:0)` 让系统分配，实际端口写在
-`~/Library/Application Support/MihomoBar/runtime.json`。
+`~/Library/Application Support/Cove/runtime.json`。
 
 ### 4. 实测踩过的坑（都在代码里处理了）
 
@@ -136,10 +136,10 @@ google.com:443                              tcp · HTTP        ↑ 1.2 KB/s   12
 全部走 unix socket 到 root 助手，不再有任何提示 —— 指纹和密码都不需要。
 
 ```
-MihomoBar (用户)
-     │  unix socket  /var/run/local.mihomobar/helper.sock  (root:admin 0660)
+Cove (用户)
+     │  unix socket  /var/run/local.cove/helper.sock  (root:admin 0660)
      ▼
-MihomoBarHelper (root, launchd 常驻)          ← launchd 拉起，KeepAlive
+CoveHelper (root, launchd 常驻)          ← launchd 拉起，KeepAlive
      ├── spawn mihomo 并持有 Process 句柄       ← 不再需要 osascript
      └── networksetup 开关系统代理
 ```
@@ -147,11 +147,11 @@ MihomoBarHelper (root, launchd 常驻)          ← launchd 拉起，KeepAlive
 安装只需要一次提权 shell：
 
 ```
-install -m 755 -o root -g wheel  <app>/Contents/MacOS/MihomoBarHelper \
-                                  /Library/PrivilegedHelperTools/local.mihomobar.helper
-install -m 644 -o root -g wheel  local.mihomobar.helper.plist \
+install -m 755 -o root -g wheel  <app>/Contents/MacOS/CoveHelper \
+                                  /Library/PrivilegedHelperTools/local.cove.helper
+install -m 644 -o root -g wheel  local.cove.helper.plist \
                                  /Library/LaunchDaemons/
-launchctl bootstrap system /Library/LaunchDaemons/local.mihomobar.helper.plist
+launchctl bootstrap system /Library/LaunchDaemons/local.cove.helper.plist
 ```
 
 **为什么不用 `SMAppService.daemon`**：它要求应用带 Apple 开发者证书签名
@@ -191,11 +191,11 @@ macOS 13+ 的 `SMAppService.mainApp`，注册 app 自身，不需要写 plist、
 ./scripts/fetch-kernel.sh
 
 # 2. 开发运行
-swift build && ./.build/debug/MihomoBar
+swift build && ./.build/debug/Cove
 
 # 3. 打包成 .app
 ./scripts/bundle.sh
-open build/MihomoBar.app
+open build/Cove.app
 ```
 
 ### 关于 Xcode
@@ -216,7 +216,7 @@ open build/MihomoBar.app
 无需点界面即可验证整条链路：
 
 ```bash
-./.build/debug/MihomoBar --selftest
+./.build/debug/Cove --selftest
 ```
 
 40+ 项，覆盖：资源定位 → 生成配置 → 分配端口 → `-t` 预检 → 启动 →
@@ -232,14 +232,14 @@ open build/MihomoBar.app
 
 ```bash
 # 助手相关（都需要在 .app 内运行）
-MihomoBar --install-helper     # 安装（弹一次授权）
-MihomoBar --uninstall-helper
-MihomoBar --helper-status
+Cove --install-helper     # 安装（弹一次授权）
+Cove --uninstall-helper
+Cove --helper-status
 
 # 界面相关（都不需要点开 GUI）
-MihomoBar --render-panes [目录]  # 六个视图离屏渲染成 PNG，检查有无空白/崩溃
-MihomoBar --dump-menu            # 打印菜单栏下拉菜单结构
-MihomoBar --dump-menu running    # 先起内核，再看「运行中」状态的菜单
+Cove --render-panes [目录]  # 六个视图离屏渲染成 PNG，检查有无空白/崩溃
+Cove --dump-menu            # 打印菜单栏下拉菜单结构
+Cove --dump-menu running    # 先起内核，再看「运行中」状态的菜单
 ```
 
 ---
@@ -265,8 +265,8 @@ MihomoBar --dump-menu running    # 先起内核，再看「运行中」状态的
 **先把 app 放到 `/Applications`** 再打开这个开关：
 
 ```bash
-cp -R build/MihomoBar.app /Applications/
-open /Applications/MihomoBar.app
+cp -R build/Cove.app /Applications/
+open /Applications/Cove.app
 ```
 
 ---
@@ -274,7 +274,7 @@ open /Applications/MihomoBar.app
 ## 目录结构
 
 ```
-Sources/MihomoBar/
+Sources/Cove/
   App.swift            入口（@main），各 CLI 分支分发
   AppDelegate.swift    菜单栏下拉菜单 + 主窗口 + 退出收尾
   AppModel.swift       共享状态（刻意不用 @State）
@@ -299,7 +299,7 @@ scripts/fetch-kernel.sh
 scripts/bundle.sh
 ```
 
-运行时数据在 `~/Library/Application Support/MihomoBar/`：
+运行时数据在 `~/Library/Application Support/Cove/`：
 
 ```
 mihomo         内核副本（可执行，将来换内核只需替换它）
@@ -319,4 +319,4 @@ settings.json  应用设置
 - [ ] 流量速率显示（`/traffic` 是流式接口）
 - [ ] 用 `NSStatusItem.button.image` 叠加延迟数字
 - [ ] 图标资源（现在用 SF Symbols）
-- [ ] 内核版本更新（替换 `~/Library/Application Support/MihomoBar/mihomo` 即可）
+- [ ] 内核版本更新（替换 `~/Library/Application Support/Cove/mihomo` 即可）

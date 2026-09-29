@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "MihomoBar",
+    name: "Cove",
     platforms: [.macOS(.v13)],
     targets: [
         // 应用与特权助手共用的协议定义，避免两边的字段拼写漂移
@@ -12,15 +12,15 @@ let package = Package(
         ),
         // 菜单栏 GUI，以当前用户身份运行
         .executableTarget(
-            name: "MihomoBar",
+            name: "Cove",
             dependencies: ["HelperProtocol"],
-            path: "Sources/MihomoBar"
+            path: "Sources/Cove"
         ),
         // 特权助手，以 root 身份常驻运行
         .executableTarget(
-            name: "MihomoBarHelper",
+            name: "CoveHelper",
             dependencies: ["HelperProtocol"],
-            path: "Sources/MihomoBarHelper"
+            path: "Sources/CoveHelper"
         ),
     ]
 )
