@@ -49,7 +49,7 @@ else
   echo "查询 MetaCubeXD 最新版本…"
   TAG=$(curl_api https://api.github.com/repos/MetaCubeX/metacubexd/releases/latest \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
-  echo "下载 MetaCubeXD $TAG…"
+  echo "下载 MetaCubeXD ${TAG} …"
   rm -rf "$RES/ui" "$RES/ui-dist"
   curl -fL --progress-bar \
     "https://github.com/MetaCubeX/metacubexd/archive/refs/tags/${TAG}.tar.gz" \
