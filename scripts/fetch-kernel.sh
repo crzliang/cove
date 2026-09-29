@@ -16,13 +16,23 @@ case "$ARCH" in
   *) echo "不支持的架构: $ARCH" >&2; exit 1 ;;
 esac
 
+# Actions 上匿名访问 api.github.com 很容易被限流。
+curl_api() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+      -H "Accept: application/vnd.github+json" "$@"
+  else
+    curl -fsSL "$@"
+  fi
+}
+
 # ---------- mihomo ----------
 if [ -x "$RES/mihomo" ] && [ "${FORCE:-0}" != "1" ]; then
   echo "内核已存在：$("$RES/mihomo" -v | head -1)"
   echo "（想强制重下请用 FORCE=1 $0）"
 else
   echo "查询 mihomo 最新版本…"
-  TAG=$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
+  TAG=$(curl_api https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
   URL="https://github.com/MetaCubeX/mihomo/releases/download/${TAG}/${MH_ASSET}${TAG}.gz"
   echo "下载 $TAG ($ARCH)…"
@@ -37,7 +47,7 @@ if [ -d "$RES/ui" ] && [ "${FORCE:-0}" != "1" ]; then
   echo "面板已存在：$RES/ui"
 else
   echo "查询 MetaCubeXD 最新版本…"
-  TAG=$(curl -fsSL https://api.github.com/repos/MetaCubeX/metacubexd/releases/latest \
+  TAG=$(curl_api https://api.github.com/repos/MetaCubeX/metacubexd/releases/latest \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
   echo "下载 MetaCubeXD $TAG…"
   rm -rf "$RES/ui" "$RES/ui-dist"
