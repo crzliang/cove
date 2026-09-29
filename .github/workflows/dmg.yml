@@ -13,7 +13,7 @@ jobs:
   dmg:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 版本号
         run: |
@@ -32,7 +32,7 @@ jobs:
       - name: 打包 dmg
         run: bash scripts/dmg.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Cove-${{ env.VERSION }}${{ env.DMG_SUFFIX }}
           path: build/Cove-*.dmg
@@ -40,7 +40,7 @@ jobs:
 
       - name: 发布到 Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: build/Cove-*.dmg
         env:
